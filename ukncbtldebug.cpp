@@ -129,9 +129,22 @@ std::wstring Utf8ToWString(const char* s)
 
 int main(int argc, char* argv[])
 {
-    // Console output mode
+    // Console output mode.  Prefer the environment's locale (for correct
+    // wide/UTF-8 console I/O), but some platforms advertise a locale via
+    // LANG/LC_ALL that their C++ runtime can't actually construct (seen on
+    // macOS with a Homebrew-built libstdc++: std::locale("") throws even
+    // though std::setlocale(LC_ALL, "") -- a plain libc call -- succeeds
+    // for the same name) -- fall back to the classic "C" locale rather
+    // than crash the whole program over console cosmetics.
     std::setlocale(LC_ALL, "");
-    std::wcout.imbue(std::locale(""));
+    try
+    {
+        std::wcout.imbue(std::locale(""));
+    }
+    catch (const std::runtime_error&)
+    {
+        std::wcout.imbue(std::locale::classic());
+    }
 
     std::vector<std::wstring> wargs;
     for (int argn = 1; argn < argc; argn++)
