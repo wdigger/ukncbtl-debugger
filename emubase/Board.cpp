@@ -170,6 +170,13 @@ CMotherboard::CMotherboard ()
 
     m_dwTrace = TRACE_NONE;
     m_CPUbps = m_PPUbps = nullptr;
+    m_CPUWatchArmed = false;
+    m_CPUWatchAddr = 0;
+    m_CPUWatchHaveValue = false;
+    m_CPUWatchLastValue = 0;
+    m_CPUWatchHit = false;
+    m_CPUWatchHitOldValue = 0;
+    m_CPUWatchHitNewValue = 0;
     m_TapeReadCallback = nullptr;
     m_TapeWriteCallback = nullptr;
     m_nTapeSampleRate = 0;
@@ -699,10 +706,53 @@ void CMotherboard::DebugTicks()
 * 8?? тиков обмена с NET-портом - каждый 64 тик ???
 */
 
+void CMotherboard::SetCPUWatchpoint(uint16_t address)
+{
+    m_CPUWatchArmed = true;
+    m_CPUWatchAddr = address;
+    m_CPUWatchHaveValue = false;
+    m_CPUWatchHit = false;
+}
+
+bool CMotherboard::TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue)
+{
+    if (!m_CPUWatchHit)
+        return false;
+    m_CPUWatchHit = false;
+    if (pOldValue != nullptr) *pOldValue = m_CPUWatchHitOldValue;
+    if (pNewValue != nullptr) *pNewValue = m_CPUWatchHitNewValue;
+    return true;
+}
+
+// Re-reads the watched word and compares it against the value seen after the
+// previous instruction. Deliberately a plain poll once per CPU instruction --
+// same granularity execution breakpoints already check at -- rather than a
+// hook on every SetWord/SetByte call site, so it catches a write regardless
+// of which of those many call sites did it, at the cost of only knowing
+// "changed since last instruction", not the exact instruction that wrote it.
+inline bool CMotherboard::CheckCPUWatchpoint()
+{
+    int addrtype;
+    uint16_t curValue = m_pFirstMemCtl->GetWordView(m_CPUWatchAddr, m_pCPU->IsHaltMode(), false, &addrtype);
+    if (m_CPUWatchHaveValue && curValue != m_CPUWatchLastValue)
+    {
+        m_CPUWatchHit = true;
+        m_CPUWatchHitOldValue = m_CPUWatchLastValue;
+        m_CPUWatchHitNewValue = curValue;
+        m_CPUWatchLastValue = curValue;
+        return true;
+    }
+    m_CPUWatchHaveValue = true;
+    m_CPUWatchLastValue = curValue;
+    return false;
+}
+
 #define FRAMETICKS 10000  // Количество тиков в одном фрейме
 #define SYSTEMFRAME_EXECUTE_CPU     { m_pCPU->Execute(); }
 #define SYSTEMFRAME_EXECUTE_PPU     { m_pPPU->Execute(); }
-#define SYSTEMFRAME_EXECUTE_BP_CPU  { m_pCPU->Execute(); if (m_CPUbps != nullptr) \
+#define SYSTEMFRAME_EXECUTE_BP_CPU  { m_pCPU->Execute(); \
+    if (m_CPUWatchArmed && CheckCPUWatchpoint()) return false; \
+    if (m_CPUbps != nullptr) \
     { const uint16_t* pbps = m_CPUbps; while(*pbps != 0177777) { if (m_pCPU->GetPC() == *pbps++) return false; } } }
 #define SYSTEMFRAME_EXECUTE_BP_PPU  { m_pPPU->Execute(); if (m_PPUbps != nullptr) \
     { const uint16_t* pbps = m_PPUbps; while(*pbps != 0177777) { if (m_pPPU->GetPC() == *pbps++) return false; } } }
@@ -730,7 +780,7 @@ bool CMotherboard::SystemFrame()
             Tick50();  // 1/50 timer event
 
         // CPU - 16 times, PPU - 12.5 times
-        if (m_CPUbps == nullptr && m_PPUbps == nullptr)  // No breakpoints, no need to check
+        if (m_CPUbps == nullptr && m_PPUbps == nullptr && !m_CPUWatchArmed)  // No breakpoints, no need to check
         {
             /*  0 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU
             /*  1 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU

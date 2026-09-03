@@ -496,6 +496,10 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  b NAME         Set breakpoint at symbol NAME (see \"symbols load\")\n"
         L"  bc             Remove all breakpoints\n"
         L"  bcXXXXXX       Remove breakpoint at address XXXXXX\n"
+        L"  w              Show the CPU write-watchpoint, if any\n"
+        L"  wXXXXXX        Break when the CPU-visible word at XXXXXX changes\n"
+        L"  w NAME         Same, at symbol NAME (see \"symbols load\")\n"
+        L"  wc             Remove the watchpoint\n"
         L"  t, trace       Toggle instruction tracing to trace.log on/off\n"
         L"  tXXXXXX, trace XXXXXX  Set trace flags XXXXXX (see TRACE_xxx constants)\n"
         L"  tc, t clear, trace clear  Clear trace.log\n"
@@ -1012,11 +1016,23 @@ void RunUntilBreakpoint(int maxFrames)
         }
     }
     Emulator_OnUpdate();  // Refresh change-tracking snapshot now that we've stopped
+    uint16_t oldValue, newValue;
+    bool hitWatchpoint = Emulator_TestAndClearCPUWatchpointHit(&oldValue, &newValue);
     CProcessor* pProc = GetCurrentProcessor();
     TCHAR bufAddr[7];
     PrintOctalValue(bufAddr, pProc->GetPC());
     std::wstring symbol = Symbols_FormatSuffix(pProc->GetPC());
-    if (hitBreakpoint)
+    if (hitWatchpoint)
+    {
+        TCHAR bufWatchAddr[7], bufOld[7], bufNew[7];
+        PrintOctalValue(bufWatchAddr, Emulator_GetCPUWatchpointAddress());
+        PrintOctalValue(bufOld, oldValue);
+        PrintOctalValue(bufNew, newValue);
+        std::wcout << L" Watchpoint hit: " << bufWatchAddr << Symbols_FormatSuffix(Emulator_GetCPUWatchpointAddress())
+                    << L" changed " << bufOld << L" -> " << bufNew << std::endl;
+        std::wcout << L" Stopped at " << bufAddr << symbol << std::endl;
+    }
+    else if (hitBreakpoint)
         std::wcout << L" Stopped at " << bufAddr << symbol << std::endl;
     else
         std::wcout << L" Stopped at " << bufAddr << symbol << L" (no breakpoint hit after "
@@ -1393,6 +1409,57 @@ void CmdRemoveAllBreakpoints(const ConsoleCommandParams& /*params*/)
     std::wcout << L"All breakpoints removed." << std::endl;
 }
 
+// "wXXXXXX" -- break when the CPU-visible word at XXXXXX changes, checked
+// after every CPU instruction (see Board.cpp's CheckCPUWatchpoint()). Just
+// one at a time; setting a new one replaces whatever was armed before.
+void CmdSetWatchpointAtAddress(const ConsoleCommandParams& params)
+{
+    uint16_t address = params.paramOct1;
+    Emulator_SetCPUWatchpoint(address);
+    TCHAR bufAddr[7];
+    PrintOctalValue(bufAddr, address);
+    std::wcout << L"Watchpoint set at " << bufAddr << Symbols_FormatSuffix(address) << std::endl;
+}
+
+// "w NAME" -- same, at a symbol loaded via "symbols load"/"sym load".
+void CmdSetWatchpointByName(const ConsoleCommandParams& params)
+{
+    uint16_t address;
+    if (!Symbols_FindByName(params.paramFilename, &address))
+    {
+        std::wcout << L" Unknown symbol: " << params.paramFilename << std::endl;
+        return;
+    }
+    Emulator_SetCPUWatchpoint(address);
+    TCHAR bufAddr[7];
+    PrintOctalValue(bufAddr, address);
+    std::wcout << L"Watchpoint set at " << bufAddr << L" <" << params.paramFilename << L">" << std::endl;
+}
+
+void CmdRemoveWatchpoint(const ConsoleCommandParams& /*params*/)
+{
+    if (!Emulator_HasCPUWatchpoint())
+    {
+        std::wcout << L" No watchpoint set." << std::endl;
+        return;
+    }
+    Emulator_ClearCPUWatchpoint();
+    std::wcout << L"Watchpoint removed." << std::endl;
+}
+
+void CmdPrintWatchpoint(const ConsoleCommandParams& /*params*/)
+{
+    if (!Emulator_HasCPUWatchpoint())
+    {
+        std::wcout << L" No watchpoint set." << std::endl;
+        return;
+    }
+    uint16_t address = Emulator_GetCPUWatchpointAddress();
+    TCHAR bufAddr[7];
+    PrintOctalValue(bufAddr, address);
+    std::wcout << L"  " << bufAddr << Symbols_FormatSuffix(address) << std::endl;
+}
+
 //////////////////////////////////////////////////////////////////////
 // Command table
 //
@@ -1530,6 +1597,11 @@ const ConsoleCommandStruct ConsoleCommands[] =
     { L"b",     ARGINFO_OCT,     CmdSetBreakpointAtAddress },     // bXXXXXX
     { L"b",     ARGINFO_FILENAME, CmdSetBreakpointByName },       // b NAME (symbol, from "symbols load")
     { L"b",     ARGINFO_NONE,    CmdPrintAllBreakpoints },        // b
+
+    { L"wc",    ARGINFO_NONE,    CmdRemoveWatchpoint },          // wc (there's only ever one, so no wcXXXXXX)
+    { L"w",     ARGINFO_OCT,     CmdSetWatchpointAtAddress },    // wXXXXXX -- break on write to CPU address XXXXXX
+    { L"w",     ARGINFO_FILENAME, CmdSetWatchpointByName },      // w NAME (symbol, from "symbols load")
+    { L"w",     ARGINFO_NONE,    CmdPrintWatchpoint },           // w
 };
 
 const size_t ConsoleCommandsCount = sizeof(ConsoleCommands) / sizeof(ConsoleCommands[0]);

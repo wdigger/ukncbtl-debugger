@@ -368,6 +368,15 @@ void Emulator_RemoveAllBreakpoints(bool okCpuPpu)
         m_wEmulatorPPUBpsCount = 0;
 }
 
+void Emulator_SetCPUWatchpoint(uint16_t address) { g_pBoard->SetCPUWatchpoint(address); }
+void Emulator_ClearCPUWatchpoint() { g_pBoard->ClearCPUWatchpoint(); }
+bool Emulator_HasCPUWatchpoint() { return g_pBoard->HasCPUWatchpoint(); }
+uint16_t Emulator_GetCPUWatchpointAddress() { return g_pBoard->GetCPUWatchpointAddress(); }
+bool Emulator_TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue)
+{
+    return g_pBoard->TestAndClearCPUWatchpointHit(pOldValue, pNewValue);
+}
+
 bool Emulator_SystemFrame()
 {
     Emulator_ProcessKeyEvent();

@@ -38,6 +38,16 @@ bool Emulator_IsBreakpoint();
 bool Emulator_IsBreakpoint(bool okCpuPpu, uint16_t address);
 void Emulator_RemoveAllBreakpoints(bool okCpuPpu);
 
+// CPU write-watchpoint: breaks when the word at `address` changes, checked
+// once per CPU instruction (see CMotherboard::CheckCPUWatchpoint). Only one
+// at a time, unlike the breakpoint list above -- simplest thing that answers
+// "who's writing here", which is all this is for.
+void Emulator_SetCPUWatchpoint(uint16_t address);
+void Emulator_ClearCPUWatchpoint();
+bool Emulator_HasCPUWatchpoint();
+uint16_t Emulator_GetCPUWatchpointAddress();
+bool Emulator_TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue);
+
 void Emulator_SetSound(bool enable);
 void Emulator_SetSoundAY(bool enable);
 void Emulator_Start();

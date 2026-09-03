@@ -173,6 +173,17 @@ public:  // Debug
     void        DebugTicks();  ///< One Debug PPU tick -- use for debug step or debug breakpoint
     void        SetCPUBreakpoints(const uint16_t* bps) { m_CPUbps = bps; } ///< Set CPU breakpoint list
     void        SetPPUBreakpoints(const uint16_t* bps) { m_PPUbps = bps; } ///< Set PPU breakpoint list
+
+    /// Single CPU write-watchpoint: after every CPU instruction, the word at
+    /// the watched address is re-read and compared against its previous
+    /// value (a plain "did it change" poll, not a hook on the store path --
+    /// simple, and only ever checked at instruction granularity, same as
+    /// execution breakpoints already are).
+    void        SetCPUWatchpoint(uint16_t address);
+    void        ClearCPUWatchpoint() { m_CPUWatchArmed = false; }
+    bool        HasCPUWatchpoint() const { return m_CPUWatchArmed; }
+    uint16_t    GetCPUWatchpointAddress() const { return m_CPUWatchAddr; }
+    bool        TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue);
     uint32_t    GetTrace() const { return m_dwTrace; }
     void        SetTrace(uint32_t dwTrace);
     chan_stc    GetChannelStruct(unsigned char cpu, unsigned char chan, unsigned char tx)
@@ -306,6 +317,14 @@ private: // Timing
 private:
     const uint16_t* m_CPUbps;  ///< CPU breakpoint list, ends with 177777 value
     const uint16_t* m_PPUbps;  ///< PPU breakpoint list, ends with 177777 value
+    bool        m_CPUWatchArmed;      ///< A CPU write-watchpoint is set
+    uint16_t    m_CPUWatchAddr;       ///< Its address
+    bool        m_CPUWatchHaveValue;  ///< m_CPUWatchLastValue holds a real prior sample yet
+    uint16_t    m_CPUWatchLastValue;  ///< Value last seen at m_CPUWatchAddr
+    bool        m_CPUWatchHit;        ///< Set when the value just changed
+    uint16_t    m_CPUWatchHitOldValue;
+    uint16_t    m_CPUWatchHitNewValue;
+    inline bool CheckCPUWatchpoint();  ///< Re-samples the watched word; true if it changed since the last instruction
     uint32_t    m_dwTrace;  ///< Trace flags
 
     uint16_t    m_timer;
@@ -364,6 +383,5 @@ inline void CMotherboard::SetRAMByte(int plan, uint16_t offset, uint8_t byte)
     ASSERT(plan >= 0 && plan <= 2);
     m_pRAM[plan][offset] = byte;
 }
-
 
 //////////////////////////////////////////////////////////////////////
