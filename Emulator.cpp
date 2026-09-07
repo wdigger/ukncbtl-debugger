@@ -376,6 +376,11 @@ bool Emulator_TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewVa
 {
     return g_pBoard->TestAndClearCPUWatchpointHit(pOldValue, pNewValue);
 }
+void Emulator_SetCPUProfiling(bool on) { g_pBoard->SetCPUProfiling(on); }
+bool Emulator_IsCPUProfiling() { return g_pBoard->IsCPUProfiling(); }
+void Emulator_ResetCPUProfile() { g_pBoard->ResetCPUProfile(); }
+const uint32_t* Emulator_GetCPUProfile() { return g_pBoard->GetCPUProfile(); }
+uint64_t Emulator_GetCPUProfileTotal() { return g_pBoard->GetCPUProfileTotal(); }
 
 bool Emulator_SystemFrame()
 {

@@ -184,6 +184,18 @@ public:  // Debug
     bool        HasCPUWatchpoint() const { return m_CPUWatchArmed; }
     uint16_t    GetCPUWatchpointAddress() const { return m_CPUWatchAddr; }
     bool        TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue);
+
+    /// CPU tick profiler: while armed, every CPU clock tick is charged to the
+    /// address of the instruction the CPU is executing at that moment (the
+    /// one it is about to fetch when m_internalTick is 0, or the one still
+    /// in flight otherwise). Since the core steps the CPU one tick at a time,
+    /// the histogram is an exact cycle count per instruction address, not a
+    /// statistical sample. Costs the "have breakpoints" execution path.
+    void        SetCPUProfiling(bool on) { m_CPUProfArmed = on; }
+    bool        IsCPUProfiling() const { return m_CPUProfArmed; }
+    void        ResetCPUProfile();
+    const uint32_t* GetCPUProfile() const { return m_CPUProfHist; }  ///< 65536 tick counters, indexed by address
+    uint64_t    GetCPUProfileTotal() const { return m_CPUProfTotal; }
     uint32_t    GetTrace() const { return m_dwTrace; }
     void        SetTrace(uint32_t dwTrace);
     chan_stc    GetChannelStruct(unsigned char cpu, unsigned char chan, unsigned char tx)
@@ -325,6 +337,11 @@ private:
     uint16_t    m_CPUWatchHitOldValue;
     uint16_t    m_CPUWatchHitNewValue;
     inline bool CheckCPUWatchpoint();  ///< Re-samples the watched word; true if it changed since the last instruction
+    bool        m_CPUProfArmed;       ///< Tick profiler on
+    uint32_t*   m_CPUProfHist;        ///< [65536] ticks per instruction address
+    uint16_t    m_CPUProfPC;          ///< Address of the instruction currently being charged
+    uint64_t    m_CPUProfTotal;       ///< Sum of the histogram
+    inline void ProfileCPUTick();     ///< Charge the coming tick -- call right before m_pCPU->Execute()
     uint32_t    m_dwTrace;  ///< Trace flags
 
     uint16_t    m_timer;

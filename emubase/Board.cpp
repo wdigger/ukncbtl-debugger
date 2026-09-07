@@ -177,6 +177,10 @@ CMotherboard::CMotherboard ()
     m_CPUWatchHit = false;
     m_CPUWatchHitOldValue = 0;
     m_CPUWatchHitNewValue = 0;
+    m_CPUProfArmed = false;
+    m_CPUProfHist = static_cast<uint32_t*>(::calloc(65536, sizeof(uint32_t)));
+    m_CPUProfPC = 0;
+    m_CPUProfTotal = 0;
     m_TapeReadCallback = nullptr;
     m_TapeWriteCallback = nullptr;
     m_nTapeSampleRate = 0;
@@ -240,6 +244,7 @@ CMotherboard::CMotherboard ()
 
 CMotherboard::~CMotherboard ()
 {
+    ::free(m_CPUProfHist);
     // Delete bus devices
     CBusDevice** ppDevice = m_pCpuDevices;
     while (*ppDevice != nullptr)
@@ -747,10 +752,31 @@ inline bool CMotherboard::CheckCPUWatchpoint()
     return false;
 }
 
+void CMotherboard::ResetCPUProfile()
+{
+    memset(m_CPUProfHist, 0, 65536 * sizeof(uint32_t));
+    m_CPUProfTotal = 0;
+    m_CPUProfPC = 0;
+}
+
+// One tick is about to be spent. With m_internalTick == 0 the CPU will fetch
+// and start the instruction at PC on this tick; otherwise it is still inside
+// the instruction it started earlier (PC already points past it), so the tick
+// goes to the address remembered then. An interrupt taken instead of a fetch
+// is charged to the interrupted instruction's address -- close enough, and
+// the ISR's own ticks then land on the ISR.
+inline void CMotherboard::ProfileCPUTick()
+{
+    if (m_pCPU->GetInternalTick() == 0)
+        m_CPUProfPC = m_pCPU->GetPC();
+    m_CPUProfHist[m_CPUProfPC]++;
+    m_CPUProfTotal++;
+}
+
 #define FRAMETICKS 10000  // Количество тиков в одном фрейме
 #define SYSTEMFRAME_EXECUTE_CPU     { m_pCPU->Execute(); }
 #define SYSTEMFRAME_EXECUTE_PPU     { m_pPPU->Execute(); }
-#define SYSTEMFRAME_EXECUTE_BP_CPU  { m_pCPU->Execute(); \
+#define SYSTEMFRAME_EXECUTE_BP_CPU  { if (m_CPUProfArmed) ProfileCPUTick(); m_pCPU->Execute(); \
     if (m_CPUWatchArmed && CheckCPUWatchpoint()) return false; \
     if (m_CPUbps != nullptr) \
     { const uint16_t* pbps = m_CPUbps; while(*pbps != 0177777) { if (m_pCPU->GetPC() == *pbps++) return false; } } }
@@ -780,7 +806,7 @@ bool CMotherboard::SystemFrame()
             Tick50();  // 1/50 timer event
 
         // CPU - 16 times, PPU - 12.5 times
-        if (m_CPUbps == nullptr && m_PPUbps == nullptr && !m_CPUWatchArmed)  // No breakpoints, no need to check
+        if (m_CPUbps == nullptr && m_PPUbps == nullptr && !m_CPUWatchArmed && !m_CPUProfArmed)  // No breakpoints, no need to check
         {
             /*  0 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU
             /*  1 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU

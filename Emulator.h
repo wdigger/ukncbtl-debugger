@@ -48,6 +48,14 @@ bool Emulator_HasCPUWatchpoint();
 uint16_t Emulator_GetCPUWatchpointAddress();
 bool Emulator_TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue);
 
+// CPU tick profiler (see CMotherboard::SetCPUProfiling): exact ticks per
+// instruction address, accumulated while on, across any number of runs.
+void Emulator_SetCPUProfiling(bool on);
+bool Emulator_IsCPUProfiling();
+void Emulator_ResetCPUProfile();
+const uint32_t* Emulator_GetCPUProfile();  // 65536 entries indexed by address
+uint64_t Emulator_GetCPUProfileTotal();
+
 void Emulator_SetSound(bool enable);
 void Emulator_SetSoundAY(bool enable);
 void Emulator_Start();

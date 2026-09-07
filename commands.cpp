@@ -17,6 +17,9 @@
 #include <ctime>
 #include <chrono>
 #include <type_traits>
+#include <algorithm>
+#include <map>
+#include <sstream>
 #include "ukncbtldebug.h"
 #include "commands.h"
 #include "Emulator.h"
@@ -500,6 +503,11 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  wXXXXXX        Break when the CPU-visible word at XXXXXX changes\n"
         L"  w NAME         Same, at symbol NAME (see \"symbols load\")\n"
         L"  wc             Remove the watchpoint\n"
+        L"  prof on, prof off  CPU tick profiler on/off (exact ticks per instruction address)\n"
+        L"  prof reset     Zero the profile\n"
+        L"  prof [N]       Top N functions by ticks (default 20; needs \"symbols load\")\n"
+        L"  prof NAME      Ticks per instruction inside function NAME\n"
+        L"  prof save FILE Write \"address ticks\" for every non-zero address to FILE\n"
         L"  t, trace       Toggle instruction tracing to trace.log on/off\n"
         L"  tXXXXXX, trace XXXXXX  Set trace flags XXXXXX (see TRACE_xxx constants)\n"
         L"  tc, t clear, trace clear  Clear trace.log\n"
@@ -1057,6 +1065,187 @@ void CmdRunToAddress(const ConsoleCommandParams& params)
 }
 
 //////////////////////////////////////////////////////////////////////
+// "prof" -- CPU tick profiler
+//
+// The core steps the CPU one clock tick per Execute() call, so charging each
+// tick to the instruction address the CPU is on (Board.cpp's
+// ProfileCPUTick()) gives an exact cycle-level profile -- no sampling, no
+// timer. It accumulates while on across any number of "cf"/"c" runs; the
+// usual round is "prof reset", "cfN", "prof". Symbols come from the loaded
+// linker map, so the function table needs "symbols load" first; addresses
+// with no symbol (RT-11 monitor, ROM) are grouped by 4K page.
+
+static void PrintTicksLine(uint64_t ticks, uint64_t total, const std::wstring& label)
+{
+    double pct = total == 0 ? 0.0 : 100.0 * (double)ticks / (double)total;
+    wchar_t buf[40];
+    swprintf(buf, sizeof(buf) / sizeof(buf[0]), L"%12llu %6.2f%%  ", (unsigned long long)ticks, pct);
+    std::wcout << buf << label << std::endl;
+}
+
+static std::wstring ProfileBucketLabel(uint16_t address)
+{
+    std::wstring name;
+    uint16_t offset;
+    if (Symbols_Find(address, &name, &offset))
+        return name;
+    TCHAR bufAddr[7];
+    PrintOctalValue(bufAddr, (uint16_t)(address & 0170000));
+    std::wostringstream os;
+    os << L"(no symbol) " << bufAddr << L"..";
+    return os.str();
+}
+
+static void PrintProfileHeader(uint64_t total)
+{
+    std::wcout << L"CPU profile: " << (unsigned long long)total << L" ticks ("
+               << (total / 160000) << L"." << ((total % 160000) * 10 / 160000) << L" frames of 160000), profiling "
+               << (Emulator_IsCPUProfiling() ? L"ON" : L"OFF") << std::endl;
+}
+
+void CmdProfOn(const ConsoleCommandParams& /*params*/)
+{
+    Emulator_SetCPUProfiling(true);
+    std::wcout << L"CPU profiling ON." << std::endl;
+}
+
+void CmdProfOff(const ConsoleCommandParams& /*params*/)
+{
+    Emulator_SetCPUProfiling(false);
+    std::wcout << L"CPU profiling OFF (profile kept; \"prof reset\" to zero it)." << std::endl;
+}
+
+void CmdProfReset(const ConsoleCommandParams& /*params*/)
+{
+    Emulator_ResetCPUProfile();
+    std::wcout << L"CPU profile zeroed." << std::endl;
+}
+
+// "prof" / "prof N": ticks per function, top N.
+static void PrintProfileTop(size_t topN)
+{
+    const uint32_t* hist = Emulator_GetCPUProfile();
+    uint64_t total = Emulator_GetCPUProfileTotal();
+    PrintProfileHeader(total);
+    if (total == 0)
+        return;
+    if (!Symbols_IsLoaded())
+        std::wcout << L"(no symbols loaded -- \"symbols load FILE\" to see function names)" << std::endl;
+
+    std::map<std::wstring, uint64_t> byFunc;
+    for (uint32_t a = 0; a < 65536; a += 2)
+    {
+        uint64_t t = (uint64_t)hist[a] + (uint64_t)hist[a + 1];
+        if (t != 0)
+            byFunc[ProfileBucketLabel((uint16_t)a)] += t;
+    }
+    std::vector<std::pair<std::wstring, uint64_t>> rows(byFunc.begin(), byFunc.end());
+    std::sort(rows.begin(), rows.end(),
+              [](const std::pair<std::wstring, uint64_t>& x, const std::pair<std::wstring, uint64_t>& y) { return x.second > y.second; });
+
+    std::wcout << L"       ticks       %  function" << std::endl;
+    size_t shown = 0;
+    uint64_t rest = 0;
+    for (const auto& row : rows)
+    {
+        if (shown < topN)
+        {
+            PrintTicksLine(row.second, total, row.first);
+            shown++;
+        }
+        else
+            rest += row.second;
+    }
+    if (rest != 0)
+        PrintTicksLine(rest, total, L"(" + std::to_wstring(rows.size() - shown) + L" more)");
+}
+
+void CmdProfTopDefault(const ConsoleCommandParams& /*params*/)
+{
+    PrintProfileTop(20);
+}
+
+void CmdProfTopN(const ConsoleCommandParams& params)
+{
+    PrintProfileTop(params.paramOct1 == 0 ? 20 : params.paramOct1);
+}
+
+// "prof NAME": every instruction of one function, with its ticks and share
+// of the whole profile, disassembled -- the hot loop stands out directly.
+void CmdProfFunction(const ConsoleCommandParams& params)
+{
+    uint16_t start;
+    if (!Symbols_FindByName(params.paramFilename, &start))
+    {
+        std::wcout << L"Unknown symbol: " << params.paramFilename
+                   << (Symbols_IsLoaded() ? L"" : L" (no symbols loaded)") << std::endl;
+        return;
+    }
+    const uint32_t* hist = Emulator_GetCPUProfile();
+    uint64_t total = Emulator_GetCPUProfileTotal();
+    PrintProfileHeader(total);
+
+    CProcessor* pProc = g_pBoard->GetCPU();
+    const CMemoryController* pMemCtl = pProc->GetMemoryController();
+    bool okHaltMode = pProc->IsHaltMode();
+    uint64_t funcTotal = 0;
+    uint32_t address = start;
+    std::wcout << L"       ticks       %  address instruction" << std::endl;
+    while (address < 65536)
+    {
+        std::wstring name;
+        uint16_t offset;
+        if (!Symbols_Find((uint16_t)address, &name, &offset) || name != params.paramFilename)
+            break;
+
+        uint16_t memory[4];
+        int addrtype;
+        for (int i = 0; i < 4; i++)
+            memory[i] = pMemCtl->GetWordView((uint16_t)(address + i * 2), okHaltMode, true, &addrtype);
+        TCHAR instr[8];
+        TCHAR args[32];
+        int length = DisassembleInstruction(memory, (uint16_t)address, instr, args);
+        if (length < 1) length = 1;
+
+        uint64_t t = 0;
+        for (int i = 0; i < length * 2 && address + i < 65536; i++)
+            t += hist[address + i];
+        funcTotal += t;
+
+        TCHAR bufAddr[7];
+        PrintOctalValue(bufAddr, (uint16_t)address);
+        std::wostringstream os;
+        os << bufAddr << L"  " << instr << L" " << args;
+        PrintTicksLine(t, total, os.str());
+        address += (uint32_t)length * 2;
+    }
+    PrintTicksLine(funcTotal, total, L"= " + params.paramFilename);
+}
+
+// "prof save FILE": the raw histogram, one "octal-address ticks" line per
+// non-zero address, for scripts.
+void CmdProfSave(const ConsoleCommandParams& params)
+{
+    const uint32_t* hist = Emulator_GetCPUProfile();
+    FILE* f = ::fopen(WStringToNarrowString(params.paramFilename).c_str(), "w");
+    if (f == nullptr)
+    {
+        std::wcout << L"FAILED to open " << params.paramFilename << std::endl;
+        return;
+    }
+    size_t lines = 0;
+    for (uint32_t a = 0; a < 65536; a++)
+    {
+        if (hist[a] == 0)
+            continue;
+        ::fprintf(f, "%06o %u\n", a, hist[a]);
+        lines++;
+    }
+    ::fclose(f);
+    std::wcout << L"Saved " << lines << L" addresses to " << params.paramFilename << std::endl;
+}
+
+//////////////////////////////////////////////////////////////////////
 // "mo" -- jump to Monitor
 //
 // The GUI build does this by injecting keystrokes into the running screen
@@ -1597,6 +1786,14 @@ const ConsoleCommandStruct ConsoleCommands[] =
     { L"b",     ARGINFO_OCT,     CmdSetBreakpointAtAddress },     // bXXXXXX
     { L"b",     ARGINFO_FILENAME, CmdSetBreakpointByName },       // b NAME (symbol, from "symbols load")
     { L"b",     ARGINFO_NONE,    CmdPrintAllBreakpoints },        // b
+
+    { L"prof on",    ARGINFO_NONE,     CmdProfOn },               // prof on
+    { L"prof off",   ARGINFO_NONE,     CmdProfOff },              // prof off
+    { L"prof reset", ARGINFO_NONE,     CmdProfReset },            // prof reset
+    { L"prof save",  ARGINFO_FILENAME, CmdProfSave },             // prof save FILE
+    { L"prof ",      ARGINFO_DEC,      CmdProfTopN },             // prof N
+    { L"prof",       ARGINFO_FILENAME, CmdProfFunction },         // prof NAME
+    { L"prof",       ARGINFO_NONE,     CmdProfTopDefault },       // prof
 
     { L"wc",    ARGINFO_NONE,    CmdRemoveWatchpoint },          // wc (there's only ever one, so no wcXXXXXX)
     { L"w",     ARGINFO_OCT,     CmdSetWatchpointAtAddress },    // wXXXXXX -- break on write to CPU address XXXXXX

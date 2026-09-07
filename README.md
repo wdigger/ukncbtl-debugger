@@ -170,6 +170,26 @@ error.
 | `tXXXXXX`, `trace XXXXXX` | Set the trace flags explicitly (see `TRACE_xxx` in `emubase/Board.h`) |
 | `tc`, `t clear`, `trace clear` | Clear `trace.log` |
 
+### Profiling
+
+| Command | Description |
+|---|---|
+| `prof on`, `prof off` | CPU tick profiler on/off; the profile keeps accumulating across runs while on |
+| `prof reset` | Zero the profile |
+| `prof`, `prof N` | Top 20 (or N) functions by CPU ticks, with their share of the total |
+| `prof NAME` | Every instruction of function `NAME`, disassembled, with its ticks |
+| `prof save FILE` | Dump the raw histogram: one `address ticks` line per non-zero address |
+
+The core steps the CPU one clock tick per call, so every tick is charged to
+the address of the instruction the CPU is executing at that moment: the
+result is an exact cycle count per instruction, not a statistical sample.
+Function names come from the loaded map (`symbols load`); ticks at addresses
+below the nearest symbol are charged to that symbol, so library code with no
+global symbol of its own shows up under whatever global precedes it, and
+addresses outside the map (monitor, ROM) are grouped by 4K page. A usual
+round is `prof reset`, `cf100`, `prof`. Profiling runs the same slower
+execution path as breakpoints do.
+
 ### Keyboard
 
 | Command | Description |
