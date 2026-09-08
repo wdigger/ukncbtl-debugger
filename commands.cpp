@@ -315,7 +315,7 @@ bool SaveMemoryDump(const std::wstring& wfilename)
     if (!file.is_open())
         return false;
 
-    file.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+    file.write(reinterpret_cast<const char*>(buf.data()), buf.size() * sizeof(uint16_t));  // the whole 64 K, not half of it
     return file.good();
 }
 
