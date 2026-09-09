@@ -790,9 +790,101 @@ void Emulator_ProcessKeyEvent()
     }
 }
 
+//////////////////////////////////////////////////////////////////////
+// Sound recording
+//
+// The board works out the speaker's level for every sample and hands it
+// to m_SoundGenCallback at SAMPLERATE; writing those down as a .wav is
+// the only way a console build can produce anything to listen to, and it
+// makes the sound as checkable after the fact as a screenshot is.
+//
+// One channel, 16 bits, SAMPLERATE. The board's own levels are 0 or
+// 0x7fff -- a square wave sitting entirely above zero -- so they are
+// centred on the way out, or every file would open with a DC step and a
+// click.
+
+static FILE* m_SoundWavFile = nullptr;
+static uint32_t m_SoundWavSamples = 0;
+
+static void SoundWavPut32(FILE* f, uint32_t v)
+{
+    fputc((int)(v & 0xff), f);
+    fputc((int)((v >> 8) & 0xff), f);
+    fputc((int)((v >> 16) & 0xff), f);
+    fputc((int)((v >> 24) & 0xff), f);
+}
+
+static void SoundWavPut16(FILE* f, uint16_t v)
+{
+    fputc((int)(v & 0xff), f);
+    fputc((int)((v >> 8) & 0xff), f);
+}
+
+// The 44-byte canonical header. Written once with the sizes it will have
+// when the recording stops, then rewritten in place by
+// Emulator_SoundRecordStop() once the sample count is known.
+static void SoundWavWriteHeader(FILE* f, uint32_t samples)
+{
+    const uint32_t datasize = samples * 2;
+
+    fwrite("RIFF", 1, 4, f);
+    SoundWavPut32(f, 36 + datasize);
+    fwrite("WAVEfmt ", 1, 8, f);
+    SoundWavPut32(f, 16);             // PCM header size
+    SoundWavPut16(f, 1);              // PCM, uncompressed
+    SoundWavPut16(f, 1);              // one channel
+    SoundWavPut32(f, SAMPLERATE);
+    SoundWavPut32(f, SAMPLERATE * 2); // bytes per second
+    SoundWavPut16(f, 2);              // bytes per sample frame
+    SoundWavPut16(f, 16);             // bits per sample
+    fwrite("data", 1, 4, f);
+    SoundWavPut32(f, datasize);
+}
+
+bool Emulator_SoundRecordStart(const char* filename)
+{
+    Emulator_SoundRecordStop();
+
+    m_SoundWavFile = fopen(filename, "wb");
+    if (m_SoundWavFile == nullptr)
+        return false;
+
+    m_SoundWavSamples = 0;
+    SoundWavWriteHeader(m_SoundWavFile, 0);
+    Emulator_SetSound(true);  // nothing reaches the callback until this
+    return true;
+}
+
+void Emulator_SoundRecordStop()
+{
+    if (m_SoundWavFile == nullptr)
+        return;
+
+    fseek(m_SoundWavFile, 0, SEEK_SET);
+    SoundWavWriteHeader(m_SoundWavFile, m_SoundWavSamples);
+    fclose(m_SoundWavFile);
+    m_SoundWavFile = nullptr;
+    Emulator_SetSound(false);
+}
+
+bool Emulator_IsSoundRecording()
+{
+    return m_SoundWavFile != nullptr;
+}
+
+uint32_t Emulator_GetSoundRecordSamples()
+{
+    return m_SoundWavSamples;
+}
+
 void CALLBACK Emulator_FeedDAC(unsigned short l, unsigned short r)
 {
-    //
+    if (m_SoundWavFile == nullptr)
+        return;
+
+    int sample = ((int)l + (int)r) / 2 - 0x4000;
+    SoundWavPut16(m_SoundWavFile, (uint16_t)(int16_t)sample);
+    m_SoundWavSamples++;
 }
 
 void Emulator_SetSound(bool enable)

@@ -209,6 +209,7 @@ int wmain_impl(std::vector<std::wstring>& wargs)
             break;
     }
 
+    Emulator_SoundRecordStop();  // a forgotten "soundstop" still leaves a playable file
     Emulator_Done();
 
     std::wcout << std::endl << L"Done." << std::endl;

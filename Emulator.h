@@ -57,6 +57,13 @@ const uint32_t* Emulator_GetCPUProfile();  // 65536 entries indexed by address
 uint64_t Emulator_GetCPUProfileTotal();
 
 void Emulator_SetSound(bool enable);
+// Records the speaker to FILE as a 16-bit mono .wav at SAMPLERATE, for
+// as long as the emulator runs -- the only way to hear anything from a
+// console build. Stopping patches the sizes into the header.
+bool Emulator_SoundRecordStart(const char* filename);
+void Emulator_SoundRecordStop();
+bool Emulator_IsSoundRecording();
+uint32_t Emulator_GetSoundRecordSamples();
 void Emulator_SetSoundAY(bool enable);
 void Emulator_Start();
 void Emulator_Stop();

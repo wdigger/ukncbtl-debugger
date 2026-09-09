@@ -522,6 +522,8 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  cartN detach, cartN d  Detach ROM cartridge from slot N; N=1..2\n"
         L"  screen [FILE]  Save black/white screenshot as FILE (PNG); default filename from timestamp\n"
         L"  screentext [FILE]  OCR the screen to text; print to console, or write to FILE\n"
+        L"  soundrec [FILE]  Record the speaker to FILE (16-bit mono WAV); default filename from timestamp\n"
+        L"  soundstop      Stop recording and close the WAV\n"
         L"  kd KEY, key down KEY    Press and hold KEY\n"
         L"  ku KEY, key up KEY      Release KEY\n"
         L"  k KEY, key KEY          Click KEY: press, wait, release\n"
@@ -918,6 +920,48 @@ void CmdScreenshot(const ConsoleCommandParams& params)
         std::wcout << L"Saved screenshot " << filename << std::endl;
     else
         std::wcout << L"FAILED to save screenshot " << filename << std::endl;
+}
+
+// "soundrec [FILE]" -- start recording the speaker to FILE as a .wav,
+// default filename from the timestamp like "screen" does. Recording runs
+// until "soundstop", or until the debugger exits.
+void CmdSoundRecord(const ConsoleCommandParams& params)
+{
+    std::wstring filename = params.paramFilename;
+    if (filename.empty())
+    {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm = *std::localtime(&t);
+        wchar_t buf[32];
+        std::swprintf(buf, sizeof(buf) / sizeof(wchar_t),
+                      L"%04d%02d%02d%02d%02d%02d.wav",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec);
+        filename = buf;
+    }
+
+    std::basic_string<TCHAR> name = WStringToTString(filename);
+    if (Emulator_SoundRecordStart(name.c_str()))
+        std::wcout << L"Recording sound to " << filename << std::endl;
+    else
+        std::wcout << L"FAILED to record sound to " << filename << std::endl;
+}
+
+// "soundstop" -- stop recording and close the .wav properly.
+void CmdSoundStop(const ConsoleCommandParams& /*params*/)
+{
+    if (!Emulator_IsSoundRecording())
+    {
+        std::wcout << L"Not recording." << std::endl;
+        return;
+    }
+
+    uint32_t samples = Emulator_GetSoundRecordSamples();
+    Emulator_SoundRecordStop();
+    std::wcout << L"Stopped recording, " << samples << L" samples ("
+               << (samples / SAMPLERATE) << L"." << ((samples * 10 / SAMPLERATE) % 10)
+               << L" s)" << std::endl;
 }
 
 // "screentext [FILE]" -- OCR the current screen; print to console, or write
@@ -1754,6 +1798,8 @@ const ConsoleCommandStruct ConsoleCommands[] =
 
     { L"screentext", ARGINFO_OPT_FILENAME, CmdScreenText },
     { L"screen",  ARGINFO_OPT_FILENAME, CmdScreenshot },
+    { L"soundrec", ARGINFO_OPT_FILENAME, CmdSoundRecord },
+    { L"soundstop", ARGINFO_NONE,        CmdSoundStop },
 
     { L"key down", ARGINFO_FILENAME, CmdKeyDown },   // key down KEY, key down MOD+KEY
     { L"kd",       ARGINFO_FILENAME, CmdKeyDown },   // kd KEY, kd MOD+KEY
