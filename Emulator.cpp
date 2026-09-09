@@ -799,9 +799,13 @@ void Emulator_ProcessKeyEvent()
 // makes the sound as checkable after the fact as a screenshot is.
 //
 // One channel, 16 bits, SAMPLERATE. The board's own levels are 0 or
-// 0x7fff -- a square wave sitting entirely above zero -- so they are
-// centred on the way out, or every file would open with a DC step and a
-// click.
+// 0x7fff: a tone is a square wave sitting entirely above zero, and a
+// silence is that offset simply held. Written down as they come, a file
+// would open at full deflection, click at every change, and record
+// silence as a steady level rather than as nothing at all. So the
+// samples go through a one-pole DC blocker on the way out -- about 14 Hz,
+// well under the lowest tone the machine makes -- which leaves the
+// square waves alone and lets silence decay to zero.
 
 static FILE* m_SoundWavFile = nullptr;
 static uint32_t m_SoundWavSamples = 0;
@@ -882,8 +886,15 @@ void CALLBACK Emulator_FeedDAC(unsigned short l, unsigned short r)
     if (m_SoundWavFile == nullptr)
         return;
 
-    int sample = ((int)l + (int)r) / 2 - 0x4000;
-    SoundWavPut16(m_SoundWavFile, (uint16_t)(int16_t)sample);
+    static int32_t dcPrevIn = 0, dcPrevOut = 0;
+
+    int32_t in = ((int32_t)l + (int32_t)r) / 2;
+    int32_t out = in - dcPrevIn + ((dcPrevOut * 255) >> 8);
+    dcPrevIn = in;
+    dcPrevOut = out;
+    if (out > 32767) out = 32767;
+    if (out < -32768) out = -32768;
+    SoundWavPut16(m_SoundWavFile, (uint16_t)(int16_t)out);
     m_SoundWavSamples++;
 }
 
