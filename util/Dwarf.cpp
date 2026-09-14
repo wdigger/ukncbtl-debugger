@@ -3,6 +3,7 @@
 #include "stdafx.h"
 #include <algorithm>
 #include <sstream>
+#include <map>
 #include "ElfFile.h"
 #include "Dwarf.h"
 
@@ -43,6 +44,44 @@ const uint64_t DW_FORM_strp         = 0x0e;
 const uint64_t DW_FORM_udata        = 0x0f;
 const uint64_t DW_FORM_data16       = 0x1e;
 const uint64_t DW_FORM_line_strp    = 0x1f;
+
+// The rest of the forms, needed only to step over an attribute of a kind
+// this reader does not read. An attribute whose size cannot be worked out
+// would lose the rest of the unit, so the list has to be complete.
+const uint64_t DW_FORM_addr         = 0x01;
+const uint64_t DW_FORM_ref_addr     = 0x10;
+const uint64_t DW_FORM_ref1         = 0x11;
+const uint64_t DW_FORM_ref2         = 0x12;
+const uint64_t DW_FORM_ref4         = 0x13;
+const uint64_t DW_FORM_ref8         = 0x14;
+const uint64_t DW_FORM_ref_udata    = 0x15;
+const uint64_t DW_FORM_indirect     = 0x16;
+const uint64_t DW_FORM_sec_offset   = 0x17;
+const uint64_t DW_FORM_exprloc      = 0x18;
+const uint64_t DW_FORM_flag_present = 0x19;
+const uint64_t DW_FORM_strx         = 0x1a;
+const uint64_t DW_FORM_addrx        = 0x1b;
+const uint64_t DW_FORM_ref_sup4     = 0x1c;
+const uint64_t DW_FORM_strp_sup     = 0x1d;
+const uint64_t DW_FORM_ref_sig8     = 0x20;
+const uint64_t DW_FORM_implicit_const = 0x21;
+const uint64_t DW_FORM_loclistx     = 0x22;
+const uint64_t DW_FORM_rnglistx     = 0x23;
+const uint64_t DW_FORM_ref_sup8     = 0x24;
+const uint64_t DW_FORM_strx1        = 0x25;
+const uint64_t DW_FORM_strx2        = 0x26;
+const uint64_t DW_FORM_strx3        = 0x27;
+const uint64_t DW_FORM_strx4        = 0x28;
+const uint64_t DW_FORM_addrx1       = 0x29;
+const uint64_t DW_FORM_addrx2       = 0x2a;
+const uint64_t DW_FORM_addrx3       = 0x2b;
+const uint64_t DW_FORM_addrx4       = 0x2c;
+
+const uint64_t DW_TAG_subprogram = 0x2e;
+
+const uint64_t DW_AT_name     = 0x03;
+const uint64_t DW_AT_low_pc   = 0x11;
+const uint64_t DW_AT_high_pc  = 0x12;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -513,9 +552,325 @@ bool ReadLineProgram(Reader& r, size_t unitEnd,
     return !r.bad;
 }
 
+//////////////////////////////////////////////////////////////////////
+// .debug_info: which addresses belong to which function
+
+struct AbbrevAttr
+{
+    uint64_t attr;
+    uint64_t form;
+    int64_t  implicitConst;  // Only meaningful for DW_FORM_implicit_const
+};
+
+struct Abbrev
+{
+    uint64_t tag = 0;
+    bool hasChildren = false;
+    std::vector<AbbrevAttr> attrs;
+};
+
+// One .debug_abbrev table, by abbreviation code. The codes are assigned
+// from one upwards and densely in practice, but nothing requires that, so
+// this is a map rather than a vector.
+typedef std::map<uint64_t, Abbrev> AbbrevTable;
+
+bool ReadAbbrevTable(const uint8_t* section, size_t size, uint64_t offset,
+                     AbbrevTable* table)
+{
+    if (section == nullptr || offset >= size)
+        return false;
+
+    Reader r(section, size);
+    r.pos = (size_t)offset;
+    for (;;)
+    {
+        uint64_t code = r.ULEB();
+        if (r.bad)
+            return false;
+        if (code == 0)
+            break;  // End of this table
+
+        Abbrev abbrev;
+        abbrev.tag = r.ULEB();
+        abbrev.hasChildren = (r.U8() != 0);
+        for (;;)
+        {
+            AbbrevAttr a;
+            a.attr = r.ULEB();
+            a.form = r.ULEB();
+            a.implicitConst = (a.form == DW_FORM_implicit_const) ? r.SLEB() : 0;
+            if (r.bad)
+                return false;
+            if (a.attr == 0 && a.form == 0)
+                break;  // End of this abbreviation's attribute list
+            abbrev.attrs.push_back(a);
+        }
+        (*table)[code] = std::move(abbrev);
+    }
+    return true;
+}
+
+// What one attribute turned out to hold. Numbers and strings are all this
+// reader wants; everything else only has to be stepped over.
+struct AttrValue
+{
+    uint64_t num = 0;
+    std::string str;
+    bool haveNum = false;
+    bool haveStr = false;
+};
+
+// Read (or skip) one attribute value. `addressSize` and `offsetSize` come
+// from the unit header. Returns false only when the form is unknown, which
+// means the rest of the unit can no longer be located.
+bool ReadAttrValue(Reader& r, uint64_t form, int64_t implicitConst,
+                   unsigned addressSize, unsigned offsetSize,
+                   const uint8_t* strSection, size_t strSize,
+                   const uint8_t* lineStrSection, size_t lineStrSize,
+                   AttrValue* value)
+{
+    switch (form)
+    {
+    case DW_FORM_addr:
+        value->num = r.Address(addressSize);
+        value->haveNum = true;
+        return true;
+    case DW_FORM_data1:
+    case DW_FORM_ref1:
+    case DW_FORM_flag:
+    case DW_FORM_strx1:
+    case DW_FORM_addrx1:
+        value->num = r.U8();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_data2:
+    case DW_FORM_ref2:
+    case DW_FORM_strx2:
+    case DW_FORM_addrx2:
+        value->num = r.U16();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_strx3:
+    case DW_FORM_addrx3:
+        value->num = r.Address(3);
+        value->haveNum = true;
+        return true;
+    case DW_FORM_data4:
+    case DW_FORM_ref4:
+    case DW_FORM_ref_sup4:
+    case DW_FORM_strx4:
+    case DW_FORM_addrx4:
+        value->num = r.U32();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_data8:
+    case DW_FORM_ref8:
+    case DW_FORM_ref_sig8:
+    case DW_FORM_ref_sup8:
+        value->num = r.U64();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_data16:
+        r.Skip(16);
+        return true;
+    case DW_FORM_sdata:
+        value->num = (uint64_t)r.SLEB();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_udata:
+    case DW_FORM_ref_udata:
+    case DW_FORM_strx:
+    case DW_FORM_addrx:
+    case DW_FORM_loclistx:
+    case DW_FORM_rnglistx:
+        value->num = r.ULEB();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_string:
+        value->str = r.String();
+        value->haveStr = true;
+        return true;
+    case DW_FORM_strp:
+    case DW_FORM_strp_sup:
+        value->str = StringAt(strSection, strSize,
+                              (offsetSize == 8) ? r.U64() : r.U32());
+        value->haveStr = true;
+        return true;
+    case DW_FORM_line_strp:
+        value->str = StringAt(lineStrSection, lineStrSize,
+                              (offsetSize == 8) ? r.U64() : r.U32());
+        value->haveStr = true;
+        return true;
+    case DW_FORM_ref_addr:
+    case DW_FORM_sec_offset:
+        value->num = (offsetSize == 8) ? r.U64() : r.U32();
+        value->haveNum = true;
+        return true;
+    case DW_FORM_exprloc:
+    case DW_FORM_block:
+        r.Skip((size_t)r.ULEB());
+        return true;
+    case DW_FORM_block1:
+        r.Skip(r.U8());
+        return true;
+    case DW_FORM_block2:
+        r.Skip(r.U16());
+        return true;
+    case DW_FORM_block4:
+        r.Skip(r.U32());
+        return true;
+    case DW_FORM_flag_present:
+        value->num = 1;
+        value->haveNum = true;
+        return true;
+    case DW_FORM_implicit_const:
+        value->num = (uint64_t)implicitConst;
+        value->haveNum = true;
+        return true;
+    case DW_FORM_indirect:
+        // The form itself is in the data rather than the abbreviation.
+        return ReadAttrValue(r, r.ULEB(), 0, addressSize, offsetSize,
+                             strSection, strSize, lineStrSection, lineStrSize,
+                             value);
+    default:
+        return false;
+    }
+}
+
+// Walk one compilation unit, adding whatever subprograms it describes.
+bool ReadInfoUnit(Reader& r, size_t unitEnd,
+                  const uint8_t* abbrevSection, size_t abbrevSize,
+                  const uint8_t* strSection, size_t strSize,
+                  const uint8_t* lineStrSection, size_t lineStrSize,
+                  std::vector<DwarfFunction>* functions)
+{
+    uint16_t version = r.U16();
+    if (version < 2 || version > 5)
+        return false;
+
+    unsigned offsetSize = 4;  // 64-bit DWARF is rejected by the caller
+    unsigned addressSize;
+    uint64_t abbrevOffset;
+    if (version >= 5)
+    {
+        uint8_t unitType = r.U8();
+        addressSize = r.U8();
+        abbrevOffset = r.U32();
+        // Type and split units carry a further header field each; neither
+        // is produced for this target, and guessing at one would misplace
+        // every DIE after it.
+        if (unitType != 1 /* DW_UT_compile */)
+            return false;
+    }
+    else
+    {
+        abbrevOffset = r.U32();
+        addressSize = r.U8();
+    }
+    if (addressSize == 0 || addressSize > 8 || r.bad)
+        return false;
+
+    AbbrevTable abbrevs;
+    if (!ReadAbbrevTable(abbrevSection, abbrevSize, abbrevOffset, &abbrevs))
+        return false;
+
+    while (r.pos < unitEnd && !r.bad)
+    {
+        uint64_t code = r.ULEB();
+        if (code == 0)
+            continue;  // Ends a sibling chain; depth is not tracked here
+
+        auto found = abbrevs.find(code);
+        if (found == abbrevs.end())
+            return false;  // Without the abbreviation the DIE cannot be sized
+        const Abbrev& abbrev = found->second;
+
+        std::string name;
+        uint64_t lowPc = 0, highPc = 0;
+        bool haveLow = false, haveHigh = false, highIsAddress = false;
+
+        for (const AbbrevAttr& a : abbrev.attrs)
+        {
+            AttrValue value;
+            if (!ReadAttrValue(r, a.form, a.implicitConst, addressSize, offsetSize,
+                               strSection, strSize, lineStrSection, lineStrSize,
+                               &value))
+                return false;
+
+            if (abbrev.tag != DW_TAG_subprogram)
+                continue;
+            if (a.attr == DW_AT_name && value.haveStr)
+                name = value.str;
+            else if (a.attr == DW_AT_low_pc && value.haveNum)
+            {
+                lowPc = value.num;
+                haveLow = true;
+            }
+            else if (a.attr == DW_AT_high_pc && value.haveNum)
+            {
+                highPc = value.num;
+                haveHigh = true;
+                // Since DWARF 4 a high PC given in a constant form is a
+                // length rather than an address; an address form still
+                // means an address.
+                highIsAddress = (a.form == DW_FORM_addr);
+            }
+        }
+
+        if (abbrev.tag == DW_TAG_subprogram && haveLow && haveHigh && !name.empty())
+        {
+            uint64_t end = highIsAddress ? highPc : lowPc + highPc;
+            if (lowPc <= 0xffff && end > lowPc && end <= 0x10000)
+            {
+                DwarfFunction fn;
+                fn.name = Widen(name);
+                fn.low = (uint16_t)lowPc;
+                fn.high = (uint16_t)end;
+                functions->push_back(std::move(fn));
+            }
+        }
+    }
+
+    return !r.bad;
+}
+
 }  // namespace
 
 //////////////////////////////////////////////////////////////////////
+
+void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functions)
+{
+    size_t infoSize = 0, abbrevSize = 0, strSize = 0, lineStrSize = 0;
+    const uint8_t* infoSection = elf.Section(".debug_info", &infoSize);
+    const uint8_t* abbrevSection = elf.Section(".debug_abbrev", &abbrevSize);
+    const uint8_t* strSection = elf.Section(".debug_str", &strSize);
+    const uint8_t* lineStrSection = elf.Section(".debug_line_str", &lineStrSize);
+
+    if (infoSection == nullptr || abbrevSection == nullptr)
+        return;
+
+    Reader outer(infoSection, infoSize);
+    while (outer.pos + 4 <= infoSize)
+    {
+        size_t unitStart = outer.pos;
+        uint32_t unitLength = outer.U32();
+        if (unitLength == 0xffffffff || unitLength == 0 ||
+            unitLength > infoSize - outer.pos)
+            break;
+        size_t unitEnd = outer.pos + unitLength;
+
+        Reader unit(infoSection, unitEnd);
+        unit.pos = outer.pos;
+        // A unit this reader cannot follow is skipped, not fatal: the rest
+        // of the program still gets its names.
+        ReadInfoUnit(unit, unitEnd, abbrevSection, abbrevSize,
+                     strSection, strSize, lineStrSection, lineStrSize, functions);
+
+        outer.pos = unitEnd;
+        if (outer.pos <= unitStart)
+            break;
+    }
+}
 
 void Dwarf_Unload()
 {

@@ -18,6 +18,22 @@
 
 class ElfImage;
 
+// One function, as .debug_info describes it: the name the programmer
+// wrote, and the address range the compiler gave it. The ELF symbol table
+// does not carry this -- the pdp11 back end emits no .type/.size
+// directives, so every symbol in it is an untyped, sizeless label and an
+// address inside a function is as likely to be named after a compiler's
+// own local label (LM_5) as after the function.
+struct DwarfFunction
+{
+    std::wstring name;
+    uint16_t low;
+    uint16_t high;  // One past the last byte
+};
+
+// Read the functions out of .debug_info. Empty if the file has none.
+void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functions);
+
 // Read the line table out of an already-loaded ELF image, replacing
 // whatever was loaded before. Returns the number of line-table rows, or 0
 // if the file carries no line information (not an error -- a program built

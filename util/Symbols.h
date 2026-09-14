@@ -23,6 +23,19 @@ size_t Symbols_LoadFromMapFile(const std::wstring& filename);
 // large offset into the one before it.
 size_t Symbols_LoadFromElfImage(const ElfImage& elf);
 
+struct DwarfFunction;
+
+// Give the symbols at the start of each of these functions the function's
+// own extent and name. Call after Symbols_LoadFromElfImage, with what
+// Dwarf_LoadFunctions found. Returns how many symbols it covered.
+//
+// The pdp11 back end emits no .type/.size, so nothing in .symtab says how
+// far a function reaches, and the compiler's own labels inside one (LM_5,
+// LVL_3) are ordinary symbols indistinguishable from it. Without extents
+// an address in the middle of a function is named after whichever of those
+// labels is nearest; with them the function wins.
+size_t Symbols_ApplyFunctionExtents(const std::vector<DwarfFunction>& functions);
+
 // True if any symbols are currently loaded.
 bool Symbols_IsLoaded();
 

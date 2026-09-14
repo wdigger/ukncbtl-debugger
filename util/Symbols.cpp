@@ -5,6 +5,7 @@
 #include <cwctype>
 #include <sstream>
 #include "ElfFile.h"
+#include "Dwarf.h"
 #include "Symbols.h"
 
 //////////////////////////////////////////////////////////////////////
@@ -138,6 +139,43 @@ size_t Symbols_LoadFromElfImage(const ElfImage& elf)
     g_symbols = std::move(loaded);
     g_imageEnd = elf.ImageEnd();
     return g_symbols.size();
+}
+
+size_t Symbols_ApplyFunctionExtents(const std::vector<DwarfFunction>& functions)
+{
+    size_t applied = 0;
+    for (const DwarfFunction& fn : functions)
+    {
+        if (fn.high <= fn.low)
+            continue;
+
+        // Every symbol at the function's entry address: the function's own
+        // symbol is there, and so, often, is a label the compiler put on
+        // the same instruction. Prefer the one already spelled the same,
+        // and otherwise take the first -- either way the address now has a
+        // symbol that says how far the function goes.
+        auto it = std::lower_bound(g_symbols.begin(), g_symbols.end(), fn.low,
+            [](const Symbol& s, uint16_t addr) { return s.address < addr; });
+
+        Symbol* chosen = nullptr;
+        for (auto scan = it; scan != g_symbols.end() && scan->address == fn.low; ++scan)
+        {
+            if (chosen == nullptr)
+                chosen = &*scan;
+            if (scan->name == fn.name)
+            {
+                chosen = &*scan;
+                break;
+            }
+        }
+
+        if (chosen == nullptr)
+            continue;  // No symbol there at all; a stripped or partial table
+        chosen->name = fn.name;
+        chosen->size = (uint16_t)(fn.high - fn.low);
+        applied++;
+    }
+    return applied;
 }
 
 bool Symbols_IsLoaded()

@@ -874,6 +874,12 @@ void CmdLoadSymbols(const ConsoleCommandParams& params)
         }
         std::wcout << L"Loaded " << count << L" symbols from " << params.paramFilename << std::endl;
 
+        std::vector<DwarfFunction> functions;
+        Dwarf_LoadFunctions(elf, &functions);
+        size_t extents = Symbols_ApplyFunctionExtents(functions);
+        if (extents > 0)
+            std::wcout << L"Sized " << extents << L" functions from the debug info" << std::endl;
+
         std::wstring lineError;
         size_t rows = Dwarf_LoadLines(elf, &lineError);
         if (rows > 0)
