@@ -24,10 +24,10 @@ tool exists for the cases where you want to:
   capture state, compare runs),
 - automate things like "boot this disk image for N frames and read what's on screen" without a
   display — the `screentext` command OCRs the framebuffer back into text.
-- debug by symbol name instead of raw octal addresses — `symbols load` reads an ordinary GNU ld
-  map file (`-Wl,-Map=out.map`, no special build step, no object-format change needed: the target
-  executable format doesn't need to carry symbols itself, since this tool reads them out-of-band)
-  and annotates disassembly, registers, and breakpoints with `<name+offset>`.
+- debug by symbol name and source line instead of raw octal addresses — `symbols load` reads
+  either an ELF executable, with its symbol table and its DWARF line table, or an ordinary GNU ld
+  map file (`-Wl,-Map=out.map`). The program itself runs from a flat RT-11 SAV image that carries
+  neither, so this is read out-of-band, from the file the linker produced on the way there.
 
 ## Building
 
@@ -151,6 +151,7 @@ suppressed automatically otherwise).
 | `b` | List all breakpoints |
 | `bXXXXXX` | Set a breakpoint at `XXXXXX` |
 | `b NAME` | Set a breakpoint at symbol `NAME` (see `symbols load`) |
+| `b FILE:LINE` | Set a breakpoint at a source line (needs an ELF built with `-g`) |
 | `bc` | Remove all breakpoints |
 | `bcXXXXXX` | Remove the breakpoint at `XXXXXX` |
 
@@ -158,7 +159,31 @@ Once symbols are loaded, every printed address (disassembly, `rpc`/`r`'s PC
 column, breakpoint list, and the "Stopped at" message after `continue`) gets
 a `<name>` or `<name+offset>` suffix for free — the nearest symbol at or
 below that address, so an offset just means "no exact symbol there", not an
-error.
+error. An ELF also gives each symbol's extent, so an address past the end of
+the program gets no name at all rather than a large offset into the last one.
+
+### Source lines
+
+Loading an ELF built with `-g` also reads its DWARF line table, and then the
+PC is reported as `file.c:42` alongside the symbol, breakpoints can be set on
+a source line, and the source itself can be listed.
+
+| Command | Description |
+|---|---|
+| `list`, `l` | Show source around the PC, or carry on from the last listing |
+| `list FILE:LINE` | Show source around that line |
+| `list NAME` | Show source around function `NAME` |
+| `files` | List the source files the line table names |
+| `b FILE:LINE` | Break at a source line |
+
+The line table is the compiler's own, so `b FILE:LINE` means "the first
+instruction the compiler attributed to that line". A line that generated no
+code of its own has no address; the breakpoint then goes to the next line
+that did, and the command says which. With optimization on, a line's code
+need not be contiguous or in source order.
+
+`list` reads the source from where the compiler recorded it at build time,
+which is only where it still is if the tree has not moved.
 
 ### Status and tracing
 
@@ -213,8 +238,10 @@ Letters are named by the Latin glyph on the key. Scancodes match UKNCBTL's own
 |---|---|
 | `memsave [FILE]` | Save a full memory dump (default `memdump.bin`) |
 | `statesave FILE` / `stateload FILE` | Save / load full emulator state — memory, registers, ports |
-| `symbols load FILE`, `sym load FILE` | Load symbols from a GNU ld map file (e.g. `-Wl,-Map=out.map`) |
+| `symbols load FILE`, `sym load FILE` | Load symbols from an ELF executable (with its DWARF source lines, if built with `-g`) or from a GNU ld map file |
 | `symbols`, `sym` | List the currently loaded symbol table |
+| `list`, `l`, `list FILE:LINE`, `list NAME` | Show source (needs an ELF built with `-g`) |
+| `files` | List the source files the line table names |
 | `diskN attach FILE`, `diskN a FILE` | Attach a floppy image to drive `N` (`1`-`4`) |
 | `diskN detach`, `diskN d` | Detach the floppy image from drive `N` |
 | `cartN attach FILE`, `cartN a FILE` | Attach a 24 KB ROM cartridge to slot `N` (`1`-`2`) |

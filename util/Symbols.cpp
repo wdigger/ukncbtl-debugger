@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
+#include "ElfFile.h"
 #include "Symbols.h"
 
 //////////////////////////////////////////////////////////////////////
@@ -13,10 +14,17 @@ namespace {
 struct Symbol
 {
     uint16_t address;
+    uint16_t size;      // 0 when the source of the symbols gave none
     std::wstring name;
 };
 
 std::vector<Symbol> g_symbols;  // Kept sorted by address ascending
+
+// One past the last address the loaded program occupies, when that is
+// known (an ELF says so; a linker map does not). Zero means "unknown", and
+// then any address at or above the lowest symbol gets a name, which is the
+// behaviour this debugger has always had for map files.
+uint16_t g_imageEnd = 0;
 
 // Parse one line of a GNU ld map file. A pure symbol-definition line looks
 // like (leading whitespace, then "0x" + hex address, then whitespace, then
@@ -101,7 +109,7 @@ size_t Symbols_LoadFromMapFile(const std::wstring& filename)
         uint16_t address;
         std::wstring name;
         if (ParseSymbolLine(line, &address, &name))
-            loaded.push_back(Symbol{ address, name });
+            loaded.push_back(Symbol{ address, 0, name });
     }
 
     if (loaded.empty())
@@ -111,6 +119,24 @@ size_t Symbols_LoadFromMapFile(const std::wstring& filename)
         [](const Symbol& a, const Symbol& b) { return a.address < b.address; });
 
     g_symbols = std::move(loaded);
+    g_imageEnd = 0;  // A map file says nothing about where the image ends
+    return g_symbols.size();
+}
+
+size_t Symbols_LoadFromElfImage(const ElfImage& elf)
+{
+    std::vector<Symbol> loaded;
+    for (const ElfSymbol& sym : elf.Symbols())
+        loaded.push_back(Symbol{ sym.address, sym.size, sym.name });
+
+    if (loaded.empty())
+        return 0;
+
+    std::sort(loaded.begin(), loaded.end(),
+        [](const Symbol& a, const Symbol& b) { return a.address < b.address; });
+
+    g_symbols = std::move(loaded);
+    g_imageEnd = elf.ImageEnd();
     return g_symbols.size();
 }
 
@@ -123,6 +149,8 @@ bool Symbols_Find(uint16_t address, std::wstring* name, uint16_t* offset)
 {
     if (g_symbols.empty())
         return false;
+    if (g_imageEnd != 0 && address >= g_imageEnd)
+        return false;  // Past the program: RT-11, the stack, or the I/O page
 
     // Largest address <= given address: upper_bound (first entry strictly
     // greater), then step back one.
@@ -132,8 +160,33 @@ bool Symbols_Find(uint16_t address, std::wstring* name, uint16_t* offset)
         return false;  // address is below the lowest known symbol
     --it;
 
+    // The nearest symbol below an address is often an assembler-generated
+    // label inside a function (a loop head, a jump target) rather than the
+    // function itself, and "L_3" says much less than "sum+6". A symbol that
+    // was given a size says where it ends, so when one of those covers the
+    // address it wins over any unsized label that happens to sit closer.
+    if (it->size == 0)
+    {
+        for (auto back = it; back != g_symbols.begin(); )
+        {
+            --back;
+            if (back->size == 0)
+                continue;
+            if (address - back->address < back->size)
+                it = back;
+            break;
+        }
+    }
+
+    uint16_t offsetInSymbol = (uint16_t)(address - it->address);
+    // A sized symbol says where it ends; an address past that belongs to
+    // nothing (padding, or a section this table doesn't cover) and naming
+    // it "something+2000" would be worse than saying nothing.
+    if (it->size != 0 && offsetInSymbol >= it->size)
+        return false;
+
     *name = it->name;
-    *offset = (uint16_t)(address - it->address);
+    *offset = offsetInSymbol;
     return true;
 }
 

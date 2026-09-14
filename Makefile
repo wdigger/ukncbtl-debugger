@@ -31,7 +31,9 @@ SRCS := \
 	emubase/SoundAY.cpp \
 	util/BitmapFile.cpp \
 	util/console.cpp \
-	util/Symbols.cpp
+	util/Symbols.cpp \
+	util/ElfFile.cpp \
+	util/Dwarf.cpp
 
 INCLUDES := -I.
 

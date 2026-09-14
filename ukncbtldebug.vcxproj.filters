@@ -54,6 +54,12 @@
     <ClCompile Include="util\Symbols.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="util\ElfFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="util\Dwarf.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="emubase\Hard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -96,6 +102,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="util\Symbols.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\ElfFile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\Dwarf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="emubase\Memory.h">

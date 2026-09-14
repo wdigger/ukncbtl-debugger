@@ -26,6 +26,8 @@
 #include "emubase/Emubase.h"
 #include "util/BitmapFile.h"
 #include "util/console.h"
+#include "util/ElfFile.h"
+#include "util/Dwarf.h"
 #include "util/Symbols.h"
 
 
@@ -497,6 +499,7 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  b              List all breakpoints\n"
         L"  bXXXXXX        Set breakpoint at address XXXXXX\n"
         L"  b NAME         Set breakpoint at symbol NAME (see \"symbols load\")\n"
+        L"  b FILE:LINE    Set breakpoint at a source line (needs an ELF built with -g)\n"
         L"  bc             Remove all breakpoints\n"
         L"  bcXXXXXX       Remove breakpoint at address XXXXXX\n"
         L"  w              Show the CPU write-watchpoint, if any\n"
@@ -514,8 +517,12 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  memsave [FILE] Save memory dump as FILE; default memdump.bin\n"
         L"  statesave FILE Save full emulator state (memory, registers, ports) to FILE\n"
         L"  stateload FILE Load full emulator state from FILE\n"
-        L"  symbols load FILE, sym load FILE  Load symbols from a GNU ld map file (-Wl,-Map=...)\n"
+        L"  symbols load FILE, sym load FILE  Load symbols from an ELF executable (and its\n"
+        L"                 DWARF source lines, if built with -g) or from a GNU ld map file\n"
         L"  symbols, sym   List the currently loaded symbol table\n"
+        L"  list, l        Show source around the PC, or carry on from the last listing\n"
+        L"  list FILE:LINE, list NAME  Show source around a line or a function\n"
+        L"  files          List the source files the line table knows about\n"
         L"  diskN attach FILE, diskN a FILE  Attach floppy image FILE to drive N; N=1..4\n"
         L"  diskN detach, diskN d  Detach floppy image from drive N; N=1..4\n"
         L"  cartN attach FILE, cartN a FILE  Attach 24K ROM cartridge FILE to slot N; N=1..2\n"
@@ -715,7 +722,8 @@ void CmdPrintRegisterPC(const ConsoleCommandParams& /*params*/)
 {
     CProcessor* pProc = GetCurrentProcessor();
     uint16_t value = pProc->GetReg(7);
-    PrintRegisterLine(_T("PC"), value, Symbols_FormatSuffix(value));
+    PrintRegisterLine(_T("PC"), value,
+        Symbols_FormatSuffix(value) + Dwarf_FormatLocationSuffix(value));
 }
 
 void CmdSetRegisterPC(const ConsoleCommandParams& params)
@@ -823,15 +831,66 @@ void CmdStateLoad(const ConsoleCommandParams& params)
         std::wcout << L"FAILED to load state " << params.paramFilename << std::endl;
 }
 
-// "symbols load FILE" / "sym load FILE" -- load a GNU ld map file (the same
-// one this project's example Makefiles already produce via -Wl,-Map=...)
-// so disasm/registers/breakpoints/"Stopped at" can show "<name+offset>"
-// instead of a bare octal address.
+// True if the file starts with ELF's four magic bytes.
+static bool LooksLikeElf(const std::wstring& filename)
+{
+    std::ifstream file(WStringToNarrowString(filename), std::ios::binary);
+    if (!file.is_open())
+        return false;
+    char magic[4] = { 0, 0, 0, 0 };
+    file.read(magic, 4);
+    return file.gcount() == 4 &&
+        magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+}
+
+// "symbols load FILE" / "sym load FILE" -- read a program's symbols, and
+// its source lines too when they are there.
+//
+// Two kinds of file are accepted. An ELF executable (link with
+// -Wl,-m,pdp11rt11 to keep one instead of going straight to a SAV) carries
+// a symbol table with sizes and, when built with -g, the DWARF line table:
+// everything the debugger prints can then name a source line. A GNU ld map
+// file (-Wl,-Map=...) carries names and addresses only, which is all this
+// command used to read and still reads for programs built without an ELF
+// to hand.
 void CmdLoadSymbols(const ConsoleCommandParams& params)
 {
+    if (LooksLikeElf(params.paramFilename))
+    {
+        ElfImage elf;
+        std::wstring error;
+        if (!elf.Load(params.paramFilename, &error))
+        {
+            std::wcout << L"FAILED to read " << params.paramFilename << L": " << error << std::endl;
+            return;
+        }
+
+        size_t count = Symbols_LoadFromElfImage(elf);
+        if (count == 0)
+        {
+            std::wcout << L"FAILED to load symbols from " << params.paramFilename
+                       << L": the symbol table is empty (stripped?)" << std::endl;
+            return;
+        }
+        std::wcout << L"Loaded " << count << L" symbols from " << params.paramFilename << std::endl;
+
+        std::wstring lineError;
+        size_t rows = Dwarf_LoadLines(elf, &lineError);
+        if (rows > 0)
+            std::wcout << L"Loaded " << rows << L" source line records" << std::endl;
+        else
+            std::wcout << L"No source line information: " << lineError << std::endl;
+        return;
+    }
+
     size_t count = Symbols_LoadFromMapFile(params.paramFilename);
     if (count > 0)
+    {
+        // A map file has no line information, and keeping the last
+        // program's would attribute its lines to this one's addresses.
+        Dwarf_Unload();
         std::wcout << L"Loaded " << count << L" symbols from " << params.paramFilename << std::endl;
+    }
     else
         std::wcout << L"FAILED to load symbols from " << params.paramFilename << std::endl;
 }
@@ -840,6 +899,166 @@ void CmdLoadSymbols(const ConsoleCommandParams& params)
 void CmdListSymbols(const ConsoleCommandParams& /*params*/)
 {
     Symbols_PrintAll();
+}
+
+//////////////////////////////////////////////////////////////////////
+// Source listing
+
+// Where a bare "list" carries on from, so that repeating it walks down the
+// file the way it does in every other debugger.
+static std::wstring g_listFile;
+static int g_listNextLine = 0;
+
+// Source files are read whole and kept, because listing is interactive and
+// the same file is asked for again and again.
+static std::map<std::wstring, std::vector<std::wstring>> g_sourceCache;
+
+// Read `path` into lines, or return nullptr if it cannot be read -- the
+// compiler recorded where the source was when it was built, and that is not
+// always where it is now.
+static const std::vector<std::wstring>* LoadSource(const std::wstring& path)
+{
+    auto found = g_sourceCache.find(path);
+    if (found != g_sourceCache.end())
+        return found->second.empty() ? nullptr : &found->second;
+
+    std::vector<std::wstring> lines;
+    std::wifstream file(WStringToNarrowString(path));
+    if (file.is_open())
+    {
+        std::wstring line;
+        while (std::getline(file, line))
+        {
+            if (!line.empty() && line.back() == L'\r')
+                line.pop_back();
+            lines.push_back(line);
+        }
+    }
+    auto inserted = g_sourceCache.emplace(path, std::move(lines));
+    return inserted.first->second.empty() ? nullptr : &inserted.first->second;
+}
+
+// Split "file.c:42" into its two halves. Returns false if the text is not
+// of that shape, which is how "b NAME" tells a symbol from a location.
+static bool ParseFileLine(const std::wstring& text, std::wstring* file, int* line)
+{
+    size_t colon = text.find_last_of(L':');
+    if (colon == std::wstring::npos || colon == 0 || colon + 1 >= text.size())
+        return false;
+    for (size_t i = colon + 1; i < text.size(); i++)
+    {
+        if (!iswdigit(text[i]))
+            return false;
+    }
+    *file = text.substr(0, colon);
+    *line = (int)wcstol(text.c_str() + colon + 1, nullptr, 10);
+    return *line > 0;
+}
+
+// Print lines [from, from+count) of `file`, marking `markLine` with "=>".
+static void PrintSourceLines(const std::wstring& file, int from, int count, int markLine)
+{
+    std::wstring path;
+    if (!Dwarf_FullPathForFile(file, &path))
+    {
+        std::wcout << L" No source file " << file << L" in the line table." << std::endl;
+        return;
+    }
+    const std::vector<std::wstring>* lines = LoadSource(path);
+    if (lines == nullptr)
+    {
+        std::wcout << L" Cannot read " << path << std::endl;
+        return;
+    }
+
+    if (from < 1)
+        from = 1;
+    if (from > (int)lines->size())
+    {
+        std::wcout << L" Past the end of " << file << L" (" << lines->size()
+                   << L" lines)." << std::endl;
+        return;
+    }
+
+    int last = from + count - 1;
+    if (last > (int)lines->size())
+        last = (int)lines->size();
+    for (int i = from; i <= last; i++)
+    {
+        std::wcout << (i == markLine ? L"=> " : L"   ")
+                   << std::setw(5) << i << L"  " << (*lines)[i - 1] << std::endl;
+    }
+
+    g_listFile = file;
+    g_listNextLine = last + 1;
+}
+
+// "list" / "l" -- show source. Bare, it carries on from the last listing,
+// or starts at the current PC. With "FILE:LINE" or a function name it
+// centres on that place instead.
+void CmdListSource(const ConsoleCommandParams& params)
+{
+    const int kPageLines = 10;
+
+    if (!Dwarf_IsLoaded())
+    {
+        std::wcout << L" No source line information loaded (use \"sym load FILE.elf\")." << std::endl;
+        return;
+    }
+
+    std::wstring file;
+    int line = 0;
+
+    if (!params.paramFilename.empty())
+    {
+        if (ParseFileLine(params.paramFilename, &file, &line))
+        {
+            PrintSourceLines(file, line - kPageLines / 2, kPageLines, -1);
+            return;
+        }
+
+        uint16_t address;
+        if (!Symbols_FindByName(params.paramFilename, &address))
+        {
+            std::wcout << L" Unknown symbol: " << params.paramFilename << std::endl;
+            return;
+        }
+        if (!Dwarf_LineForAddress(address, &file, &line))
+        {
+            std::wcout << L" No source line for " << params.paramFilename << std::endl;
+            return;
+        }
+        PrintSourceLines(file, line - kPageLines / 2, kPageLines, line);
+        return;
+    }
+
+    if (!g_listFile.empty())
+    {
+        PrintSourceLines(g_listFile, g_listNextLine, kPageLines, -1);
+        return;
+    }
+
+    CProcessor* pProc = GetCurrentProcessor();
+    if (!Dwarf_LineForAddress(pProc->GetPC(), &file, &line))
+    {
+        std::wcout << L" No source line for the current PC." << std::endl;
+        return;
+    }
+    PrintSourceLines(file, line - kPageLines / 2, kPageLines, line);
+}
+
+// "srclist" / "files" -- every source file the line table knows about.
+void CmdListSourceFiles(const ConsoleCommandParams& /*params*/)
+{
+    std::vector<std::wstring> files;
+    Dwarf_ListFiles(&files);
+    if (files.empty())
+    {
+        std::wcout << L" No source line information loaded." << std::endl;
+        return;
+    }
+    for (const std::wstring& f : files)
+        std::wcout << L"  " << f << std::endl;
 }
 
 // "disk1 attach FILE" .. "disk4 attach FILE" -- the slot digit is the 5th
@@ -1073,7 +1292,8 @@ void RunUntilBreakpoint(int maxFrames)
     CProcessor* pProc = GetCurrentProcessor();
     TCHAR bufAddr[7];
     PrintOctalValue(bufAddr, pProc->GetPC());
-    std::wstring symbol = Symbols_FormatSuffix(pProc->GetPC());
+    std::wstring symbol = Symbols_FormatSuffix(pProc->GetPC())
+        + Dwarf_FormatLocationSuffix(pProc->GetPC());
     if (hitWatchpoint)
     {
         TCHAR bufWatchAddr[7], bufOld[7], bufNew[7];
@@ -1606,11 +1826,41 @@ void CmdSetBreakpointAtAddress(const ConsoleCommandParams& params)
 void CmdSetBreakpointByName(const ConsoleCommandParams& params)
 {
     uint16_t address;
-    if (!Symbols_FindByName(params.paramFilename, &address))
+    std::wstring what = params.paramFilename;
+
+    std::wstring file;
+    int line = 0;
+    if (ParseFileLine(what, &file, &line))
     {
-        std::wcout << L" Unknown symbol: " << params.paramFilename << std::endl;
+        if (!Dwarf_IsLoaded())
+        {
+            std::wcout << L" No source line information loaded (use \"sym load FILE.elf\")." << std::endl;
+            return;
+        }
+        int actualLine = 0;
+        if (!Dwarf_AddressForLine(file, line, &address, &actualLine))
+        {
+            std::wcout << L" No code at " << what << std::endl;
+            return;
+        }
+        // The line asked for may have generated no code of its own; say so
+        // rather than silently breaking somewhere else.
+        if (actualLine != line)
+        {
+            std::wcout << L" Line " << line << L" has no code; using line "
+                       << actualLine << L"." << std::endl;
+            line = actualLine;
+        }
+        std::wostringstream oss;
+        oss << file << L":" << line;
+        what = oss.str();
+    }
+    else if (!Symbols_FindByName(what, &address))
+    {
+        std::wcout << L" Unknown symbol: " << what << std::endl;
         return;
     }
+
     bool result = Emulator_AddCPUBreakpoint(address);
     if (!result)
     {
@@ -1619,7 +1869,7 @@ void CmdSetBreakpointByName(const ConsoleCommandParams& params)
     }
     TCHAR bufAddr[7];
     PrintOctalValue(bufAddr, address);
-    std::wcout << L"Breakpoint set at " << bufAddr << L" <" << params.paramFilename << L">" << std::endl;
+    std::wcout << L"Breakpoint set at " << bufAddr << L" <" << what << L">" << std::endl;
 }
 
 void CmdRemoveBreakpointAtAddress(const ConsoleCommandParams& params)
@@ -1765,6 +2015,10 @@ const ConsoleCommandStruct ConsoleCommands[] =
     { L"memsave", ARGINFO_OPT_FILENAME, CmdSaveMemoryDump },        // memsave [FILE]
     { L"statesave", ARGINFO_FILENAME,   CmdStateSave },              // statesave FILENAME
     { L"stateload", ARGINFO_FILENAME,   CmdStateLoad },              // stateload FILENAME
+
+    { L"list", ARGINFO_OPT_FILENAME, CmdListSource },                // list [FILE:LINE | NAME]
+    { L"l",    ARGINFO_OPT_FILENAME, CmdListSource },                // l [FILE:LINE | NAME]
+    { L"files", ARGINFO_NONE,        CmdListSourceFiles },           // files
 
     { L"symbols load", ARGINFO_FILENAME, CmdLoadSymbols },           // symbols load FILENAME
     { L"sym load",      ARGINFO_FILENAME, CmdLoadSymbols },          // sym load FILENAME

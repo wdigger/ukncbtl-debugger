@@ -9,10 +9,19 @@
 
 #pragma once
 
+class ElfImage;
+
 // Load symbols from a linker map file, replacing any previously loaded
 // table. Returns the number of symbols loaded, or 0 on failure (file not
 // found, or no symbol-looking lines in it).
 size_t Symbols_LoadFromMapFile(const std::wstring& filename);
+
+// Load symbols from an already-read ELF executable's .symtab, replacing any
+// previously loaded table. Returns the number of symbols loaded. Unlike the
+// map file this also carries each symbol's size, so an address in the gap
+// after one symbol's end is reported as having no symbol rather than as a
+// large offset into the one before it.
+size_t Symbols_LoadFromElfImage(const ElfImage& elf);
 
 // True if any symbols are currently loaded.
 bool Symbols_IsLoaded();
