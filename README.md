@@ -175,6 +175,26 @@ a source line, and the source itself can be listed.
 | `list NAME` | Show source around function `NAME` |
 | `files` | List the source files the line table names |
 | `b FILE:LINE` | Break at a source line |
+| `ss`, `sstep` | Step one source line, into calls that have source |
+| `sn`, `snext` | Step one source line, running any call to completion |
+
+Disassembly is interleaved with the source it came from:
+
+```
+g2.c:6    for (int i = 1; i <= n; i++)
+ 001162 <sum+000014> MOV #000001, 177774(R5)
+ 001170 <sum+000022> BR 001204
+g2.c:7      total += i;
+ 001172 <sum+000024> ADD 177774(R5), 177776(R5)
+```
+
+`ss` and `sn` single-step until the source line changes; `sn` additionally
+ignores lines outside the function it started in, so a call runs to
+completion instead of being stepped through. Neither can stop in a function
+with no line information of its own, so both run library and operating
+system calls to the end. Single-stepping does not advance the frame timer,
+so code waiting on the 50 Hz interrupt or on a keypress will not make
+progress; both commands give up after two million instructions and say so.
 
 The line table is the compiler's own, so `b FILE:LINE` means "the first
 instruction the compiler attributed to that line". A line that generated no
@@ -242,6 +262,7 @@ Letters are named by the Latin glyph on the key. Scancodes match UKNCBTL's own
 | `symbols`, `sym` | List the currently loaded symbol table |
 | `list`, `l`, `list FILE:LINE`, `list NAME` | Show source (needs an ELF built with `-g`) |
 | `files` | List the source files the line table names |
+| `ss`, `sstep`, `sn`, `snext` | Step by source line, into or over calls |
 | `diskN attach FILE`, `diskN a FILE` | Attach a floppy image to drive `N` (`1`-`4`) |
 | `diskN detach`, `diskN d` | Detach the floppy image from drive `N` |
 | `cartN attach FILE`, `cartN a FILE` | Attach a 24 KB ROM cartridge to slot `N` (`1`-`2`) |

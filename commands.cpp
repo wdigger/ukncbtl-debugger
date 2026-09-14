@@ -105,6 +105,39 @@ void PrintRegisterLine(LPCTSTR strName, uint16_t value, const std::wstring& symb
     std::wcout << L"  " << strName << L" " << bufOctal << symbolSuffix << L"  " << bufBinary << std::endl;
 }
 
+// Defined further down, with the rest of the source-listing code.
+static const std::vector<std::wstring>* LoadSource(const std::wstring& path);
+
+// Print the source line an address belongs to, if it is a different one
+// from the last address printed -- so a disassembly reads as the compiler's
+// output under each line of the program, the way it does in every other
+// debugger. `lastFile`/`lastLine` carry the state between calls; start them
+// empty and at zero.
+static void PrintSourceLineIfChanged(uint16_t address, std::wstring* lastFile, int* lastLine)
+{
+    std::wstring file;
+    int line = 0;
+    if (!Dwarf_LineForAddress(address, &file, &line))
+        return;
+    if (file == *lastFile && line == *lastLine)
+        return;
+    *lastFile = file;
+    *lastLine = line;
+
+    std::wstring path, text;
+    if (Dwarf_FullPathForFile(file, &path))
+    {
+        const std::vector<std::wstring>* lines = LoadSource(path);
+        if (lines != nullptr && line >= 1 && line <= (int)lines->size())
+            text = (*lines)[line - 1];
+    }
+
+    std::wcout << file << L":" << line;
+    if (!text.empty())
+        std::wcout << L"  " << text;
+    std::wcout << std::endl;
+}
+
 // Print one disassembled instruction line.
 // okShort: omit the raw opcode-word column (mirrors the "D" vs "d" command).
 void PrintDisassembleLine(uint16_t address, uint16_t value, LPCTSTR instr, LPCTSTR args, bool okShort)
@@ -141,6 +174,8 @@ int PrintDisassemble(CProcessor* pProc, uint16_t address, bool okOneInstr, bool 
 
     int lastLength = 0;
     int length = 0;
+    std::wstring lastFile;
+    int lastLine = 0;
     for (int index = 0; index < nWindowSize; index++)
     {
         uint16_t value = memory[index];
@@ -161,6 +196,7 @@ int PrintDisassemble(CProcessor* pProc, uint16_t address, bool okOneInstr, bool 
             if (index + length > nWindowSize)
                 break;
 
+            PrintSourceLineIfChanged(address, &lastFile, &lastLine);
             PrintDisassembleLine(address, value, instr, args, okShort);
         }
 
@@ -474,6 +510,8 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  cfN, continue frames N  Continue; run for N frames, decimal (1 sec = 50 frames)\n"
         L"  s, step        Step Into; executes one instruction\n"
         L"  n, next        Step Over (Next); executes and stops after the current instruction\n"
+        L"  ss, sstep      Step one source line, into calls that have source\n"
+        L"  sn, snext      Step one source line, running any call to completion\n"
         L"  r, regs        Show register values\n"
         L"  r ext, regs ext  Show extended (I/O port) registers\n"
         L"  i, info        Show machine status: uptime, floppy drives\n"
@@ -774,6 +812,127 @@ void CmdStepOver(const ConsoleCommandParams& /*params*/)
     RunUntilBreakpoint();
 }
 
+// Print where execution has ended up, and the source line itself.
+static void PrintCurrentSourceLine(uint16_t address)
+{
+    TCHAR bufAddr[7];
+    PrintOctalValue(bufAddr, address);
+    std::wcout << L" " << bufAddr << Symbols_FormatSuffix(address)
+               << Dwarf_FormatLocationSuffix(address) << std::endl;
+
+    std::wstring file;
+    int line = 0;
+    if (!Dwarf_LineForAddress(address, &file, &line))
+        return;
+    std::wstring path;
+    if (!Dwarf_FullPathForFile(file, &path))
+        return;
+    const std::vector<std::wstring>* lines = LoadSource(path);
+    if (lines != nullptr && line >= 1 && line <= (int)lines->size())
+        std::wcout << L"   " << std::setw(5) << line << L"  " << (*lines)[line - 1] << std::endl;
+}
+
+// "sstep"/"ss" and "snext"/"sn" -- step by source line rather than by
+// instruction, single-stepping until the line changes.
+//
+// The difference between the two is what happens at a call. "ss" stops at
+// whatever line comes up next, at whatever depth, so a call with source of
+// its own is stepped into. "sn" wants the next line of *this* function, so
+// it ignores lines belonging to anything else: .debug_info says where the
+// function being stepped begins and ends, and a line outside that range is
+// somebody else's. Coming back out of the function is not "somebody else's
+// line" though, and that is what the stack pointer distinguishes -- on the
+// way out of a function it is above where it started, on the way into a
+// callee below.
+//
+// (A function that calls itself defeats the range test: the recursive call
+// is inside the same range, so "sn" stops in it. Telling the two apart
+// needs the call frame, which is what .debug_frame is for and this does not
+// read yet.)
+//
+// A callee with no line information of its own -- a library function, the
+// operating system -- has nothing for either command to stop on, so both
+// run through it and out the other side.
+//
+// The cap is there because single-stepping does not run the frame timer:
+// code waiting for the 50 Hz interrupt, or for a key, would otherwise step
+// for ever.
+static void SourceStep(bool stepInto)
+{
+    const long kMaxInstructions = 2000000;
+
+    if (!Dwarf_IsLoaded())
+    {
+        std::wcout << L" No source line information loaded (use \"sym load FILE.elf\")." << std::endl;
+        return;
+    }
+
+    CProcessor* pProc = GetCurrentProcessor();
+    uint16_t startPC = pProc->GetPC();
+    std::wstring startFile;
+    int startLine = 0;
+    bool haveStart = Dwarf_LineForAddress(startPC, &startFile, &startLine);
+    uint16_t startSP = pProc->GetReg(6);
+
+    uint16_t fnLow = 0, fnHigh = 0;
+    bool haveFunction = Dwarf_FunctionRange(startPC, &fnLow, &fnHigh);
+
+    long executed = 0;
+    while (executed < kMaxInstructions)
+    {
+        g_pBoard->DebugTicks();
+        executed++;
+
+        uint16_t pc = pProc->GetPC();
+        uint16_t sp = pProc->GetReg(6);
+
+        std::wstring name;
+        uint16_t ignored;
+        if (!Symbols_Find(pc, &name, &ignored) && sp > startSP)
+        {
+            // Out of the program altogether and the stack unwound past
+            // where it started: this went back to the monitor, and no
+            // amount of further stepping will find another source line.
+            Emulator_OnUpdate();
+            std::wcout << L" Left the program after " << executed
+                       << L" instructions." << std::endl;
+            PrintCurrentSourceLine(pc);
+            return;
+        }
+
+        std::wstring file;
+        int line = 0;
+        if (!Dwarf_LineForAddress(pc, &file, &line))
+            continue;  // Code this program has no source for
+
+        // Still on the line we started on.
+        if (haveStart && file == startFile && line == startLine)
+            continue;
+
+        if (!stepInto && haveFunction && (pc < fnLow || pc >= fnHigh) && sp <= startSP)
+            continue;  // Inside a callee, which "sn" steps over
+
+        Emulator_OnUpdate();
+        PrintCurrentSourceLine(pc);
+        return;
+    }
+
+    Emulator_OnUpdate();
+    std::wcout << L" Gave up after " << executed
+               << L" instructions without reaching another source line." << std::endl;
+    PrintCurrentSourceLine(pProc->GetPC());
+}
+
+void CmdSourceStepInto(const ConsoleCommandParams& /*params*/)
+{
+    SourceStep(true);
+}
+
+void CmdSourceStepOver(const ConsoleCommandParams& /*params*/)
+{
+    SourceStep(false);
+}
+
 void CmdPrintDisassembleAtPC(const ConsoleCommandParams& params)
 {
     bool okShort = (params.commandText[0] == L'D');
@@ -874,18 +1033,20 @@ void CmdLoadSymbols(const ConsoleCommandParams& params)
         }
         std::wcout << L"Loaded " << count << L" symbols from " << params.paramFilename << std::endl;
 
-        std::vector<DwarfFunction> functions;
-        Dwarf_LoadFunctions(elf, &functions);
-        size_t extents = Symbols_ApplyFunctionExtents(functions);
-        if (extents > 0)
-            std::wcout << L"Sized " << extents << L" functions from the debug info" << std::endl;
-
+        // Lines first: loading them discards whatever was read for the
+        // previous program, functions included.
         std::wstring lineError;
         size_t rows = Dwarf_LoadLines(elf, &lineError);
         if (rows > 0)
             std::wcout << L"Loaded " << rows << L" source line records" << std::endl;
         else
             std::wcout << L"No source line information: " << lineError << std::endl;
+
+        std::vector<DwarfFunction> functions;
+        Dwarf_LoadFunctions(elf, &functions);
+        size_t extents = Symbols_ApplyFunctionExtents(functions);
+        if (extents > 0)
+            std::wcout << L"Sized " << extents << L" functions from the debug info" << std::endl;
         return;
     }
 
@@ -2008,6 +2169,10 @@ const ConsoleCommandStruct ConsoleCommands[] =
     { L"n",       ARGINFO_NONE,    CmdStepOver },
     { L"step",    ARGINFO_NONE,    CmdStepInto },
     { L"s",       ARGINFO_NONE,    CmdStepInto },
+    { L"snext",   ARGINFO_NONE,    CmdSourceStepOver },
+    { L"sn",      ARGINFO_NONE,    CmdSourceStepOver },
+    { L"sstep",   ARGINFO_NONE,    CmdSourceStepInto },
+    { L"ss",      ARGINFO_NONE,    CmdSourceStepInto },
 
     { L"reset", ARGINFO_NONE,    CmdReset },
 

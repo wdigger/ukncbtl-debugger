@@ -254,6 +254,7 @@ struct LineRow
 };
 
 std::vector<SourceFile> g_files;
+std::vector<DwarfFunction> g_functions;  // Sorted by low address
 std::vector<LineRow> g_rows;   // Sorted by address; see the comparator below
 
 // Files are shared between compilation units -- every unit that includes a
@@ -838,8 +839,25 @@ bool ReadInfoUnit(Reader& r, size_t unitEnd,
 
 //////////////////////////////////////////////////////////////////////
 
+bool Dwarf_FunctionRange(uint16_t address, uint16_t* low, uint16_t* high)
+{
+    // Functions do not nest, so the last one starting at or below the
+    // address is the only candidate.
+    auto it = std::upper_bound(g_functions.begin(), g_functions.end(), address,
+        [](uint16_t addr, const DwarfFunction& fn) { return addr < fn.low; });
+    if (it == g_functions.begin())
+        return false;
+    --it;
+    if (address >= it->high)
+        return false;
+    *low = it->low;
+    *high = it->high;
+    return true;
+}
+
 void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functions)
 {
+    g_functions.clear();
     size_t infoSize = 0, abbrevSize = 0, strSize = 0, lineStrSize = 0;
     const uint8_t* infoSection = elf.Section(".debug_info", &infoSize);
     const uint8_t* abbrevSection = elf.Section(".debug_abbrev", &abbrevSize);
@@ -870,12 +888,17 @@ void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functi
         if (outer.pos <= unitStart)
             break;
     }
+
+    g_functions = *functions;
+    std::sort(g_functions.begin(), g_functions.end(),
+        [](const DwarfFunction& a, const DwarfFunction& b) { return a.low < b.low; });
 }
 
 void Dwarf_Unload()
 {
     g_files.clear();
     g_rows.clear();
+    g_functions.clear();
 }
 
 bool Dwarf_IsLoaded()

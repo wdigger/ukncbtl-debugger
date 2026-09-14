@@ -31,8 +31,12 @@ struct DwarfFunction
     uint16_t high;  // One past the last byte
 };
 
-// Read the functions out of .debug_info. Empty if the file has none.
+// Read the functions out of .debug_info. Empty if the file has none. The
+// table is also kept internally, for Dwarf_FunctionRange below.
 void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functions);
+
+// The range of the function containing `address`, if one does.
+bool Dwarf_FunctionRange(uint16_t address, uint16_t* low, uint16_t* high);
 
 // Read the line table out of an already-loaded ELF image, replacing
 // whatever was loaded before. Returns the number of line-table rows, or 0
@@ -40,8 +44,10 @@ void Dwarf_LoadFunctions(const ElfImage& elf, std::vector<DwarfFunction>* functi
 // without -g simply has none), with the reason in `error`.
 size_t Dwarf_LoadLines(const ElfImage& elf, std::wstring* error);
 
-// Forget everything loaded, so that a failed or symbol-only load doesn't
-// leave the previous program's lines behind.
+// Forget everything loaded -- lines and functions both -- so that a failed
+// or symbol-only load doesn't leave the previous program's behind. Note
+// that Dwarf_LoadLines starts by doing this, so it has to be called before
+// Dwarf_LoadFunctions and not after.
 void Dwarf_Unload();
 
 bool Dwarf_IsLoaded();
