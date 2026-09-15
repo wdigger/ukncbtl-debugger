@@ -13,13 +13,6 @@ extern CMotherboard* g_pBoard;
 
 extern bool g_okEmulatorRunning;
 
-extern uint8_t* g_pEmulatorRam[3];  // RAM values - for change tracking
-extern uint8_t* g_pEmulatorChangedRam[3];  // RAM change flags
-extern uint16_t g_wEmulatorCpuR[9];      // Current CPU register values
-extern uint16_t g_wEmulatorPrevCpuR[9];  // Previous CPU register values
-extern uint16_t g_wEmulatorPpuR[9];      // Current PPU register values
-extern uint16_t g_wEmulatorPrevPpuR[9];  // Previous PPU register values
-
 
 //////////////////////////////////////////////////////////////////////
 
@@ -35,69 +28,15 @@ bool Emulator_RemoveCPUBreakpoint(uint16_t address);
 bool Emulator_RemovePPUBreakpoint(uint16_t address);
 void Emulator_SetTempCPUBreakpoint(uint16_t address);
 void Emulator_SetTempPPUBreakpoint(uint16_t address);
-const uint16_t* Emulator_GetCPUBreakpointList();
-const uint16_t* Emulator_GetPPUBreakpointList();
-bool Emulator_IsBreakpoint();
 bool Emulator_IsBreakpoint(bool okCpuPpu, uint16_t address);
-void Emulator_RemoveAllBreakpoints(bool okCpuPpu);
 
-// CPU write-watchpoint: breaks when the word at `address` changes, checked
-// once per CPU instruction (see CMotherboard::CheckCPUWatchpoint). Only one
-// at a time, unlike the breakpoint list above -- simplest thing that answers
-// "who's writing here", which is all this is for.
-void Emulator_SetCPUWatchpoint(uint16_t address);
-void Emulator_ClearCPUWatchpoint();
-bool Emulator_HasCPUWatchpoint();
-uint16_t Emulator_GetCPUWatchpointAddress();
-bool Emulator_TestAndClearCPUWatchpointHit(uint16_t* pOldValue, uint16_t* pNewValue);
-
-// CPU tick profiler (see CMotherboard::SetCPUProfiling): exact ticks per
-// instruction address, accumulated while on, across any number of runs.
-void Emulator_SetCPUProfiling(bool on);
-bool Emulator_IsCPUProfiling();
-void Emulator_ResetCPUProfile();
-const uint32_t* Emulator_GetCPUProfile();  // 65536 entries indexed by address
-uint64_t Emulator_GetCPUProfileTotal();
-
-void Emulator_SetSound(bool enable);
-// Records the speaker to FILE as a 16-bit mono .wav at SAMPLERATE, for
-// as long as the emulator runs -- the only way to hear anything from a
-// console build. Stopping patches the sizes into the header.
-bool Emulator_SoundRecordStart(const char* filename);
-void Emulator_SoundRecordStop();
-bool Emulator_IsSoundRecording();
-uint32_t Emulator_GetSoundRecordSamples();
-void Emulator_SetSoundAY(bool enable);
 void Emulator_Start();
 void Emulator_Stop();
 void Emulator_Reset();
 bool Emulator_SystemFrame();
-float Emulator_GetUptime();  // UKNC uptime, in seconds
-
-//void Emulator_GetScreenSize(int scrmode, int* pwid, int* phei);
-void Emulator_PrepareScreenRGB32(void* pBits, const uint32_t* colors);
-void Emulator_PrepareScreenToText(void* pBits, const uint32_t* colors);
-const uint32_t* Emulator_GetPalette();
 
 void Emulator_KeyEvent(uint8_t keyPressed, bool pressed);
-uint16_t Emulator_GetKeyEventFromQueue();
-void Emulator_ProcessKeyEvent();
 
-// Update cached values after Run or Step
-void Emulator_OnUpdate();
-bool Emulator_IsRegisterChanged(int r);
-uint16_t Emulator_GetChangeRamStatus(int addrtype, uint16_t address);
-
-bool Emulator_LoadROMCartridge(int slot, std::string& sFilePath);
-void Emulator_DetachCartridge(int slot);
 bool Emulator_AttachFloppyImage(int slot, LPCTSTR sFilePath);
-void Emulator_DetachFloppyImage(int slot);
-bool Emulator_IsFloppyImageAttached(int slot);
-bool Emulator_IsFloppyReadOnly(int slot);
-bool Emulator_IsFloppyEngineOn();
-
-bool Emulator_SaveImage(const std::string &sFilePath);
-bool Emulator_LoadImage(const std::string &sFilePath);
-
 
 //////////////////////////////////////////////////////////////////////

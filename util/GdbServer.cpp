@@ -493,7 +493,6 @@ int RunUntilStop()
     }
 
     Emulator_Stop();
-    Emulator_OnUpdate();
     return signal;
 }
 
@@ -521,12 +520,10 @@ int RangeStep(uint16_t low, uint16_t high)
         int ch = RecvByte(false);
         if (ch == 0x03 || ch == -1)
         {
-            Emulator_OnUpdate();
             return 2;
         }
     }
 
-    Emulator_OnUpdate();
     return 5;
 }
 
@@ -588,7 +585,6 @@ bool StartProgram(const std::string& name, std::string* error)
         }
     }
     Emulator_Stop();
-    Emulator_OnUpdate();
 
     // Everything printed up to here is the operating system's -- the
     // echo of the "R NAME" just typed -- and not the program's.
@@ -789,7 +785,6 @@ bool HandlePacket(const std::string& packet)
                     Proc()->SetReg(7, (uint16_t)address);
             }
             g_pBoard->DebugTicks();
-            Emulator_OnUpdate();
             return SendPacket("S05");
         }
 
@@ -837,7 +832,6 @@ bool HandlePacket(const std::string& packet)
                 if (action == 's' || action == 'S')
                 {
                     g_pBoard->DebugTicks();
-                    Emulator_OnUpdate();
                     return SendPacket("S05");
                 }
                 if (action == 'c' || action == 'C')
