@@ -89,6 +89,37 @@ CProcessor* GetCurrentProcessor()
         return g_pBoard->GetPPU();
 }
 
+// The two processors have separate address spaces and separate
+// breakpoint lists, so every breakpoint goes to whichever one the "p"
+// command is on -- the same processor the prompt names and the register
+// and step commands act on.
+
+bool AddBreakpointHere(uint16_t address)
+{
+    return m_okCurrentProc ? Emulator_AddCPUBreakpoint(address)
+                           : Emulator_AddPPUBreakpoint(address);
+}
+
+bool RemoveBreakpointHere(uint16_t address)
+{
+    return m_okCurrentProc ? Emulator_RemoveCPUBreakpoint(address)
+                           : Emulator_RemovePPUBreakpoint(address);
+}
+
+void SetTempBreakpointHere(uint16_t address)
+{
+    if (m_okCurrentProc)
+        Emulator_SetTempCPUBreakpoint(address);
+    else
+        Emulator_SetTempPPUBreakpoint(address);
+}
+
+const uint16_t* BreakpointListHere()
+{
+    return m_okCurrentProc ? Emulator_GetCPUBreakpointList()
+                           : Emulator_GetPPUBreakpointList();
+}
+
 // Forward declaration: RunUntilBreakpoint is defined further down (near the
 // "continue" commands) but is also used by CmdStepOver defined before it.
 void RunUntilBreakpoint(int maxFrames = 3000);
@@ -811,7 +842,7 @@ void CmdStepOver(const ConsoleCommandParams& /*params*/)
     }
 
     uint16_t bpaddress = (uint16_t)(pProc->GetPC() + instrLength * 2);
-    Emulator_SetTempCPUBreakpoint(bpaddress);
+    SetTempBreakpointHere(bpaddress);
     RunUntilBreakpoint();
 }
 
@@ -1517,7 +1548,7 @@ void CmdRunFrames(const ConsoleCommandParams& params)
 void CmdRunToAddress(const ConsoleCommandParams& params)
 {
     uint16_t address = params.paramOct1;
-    Emulator_SetTempCPUBreakpoint(address);
+    SetTempBreakpointHere(address);
     RunUntilBreakpoint();
 }
 
@@ -1983,7 +2014,7 @@ void CmdClearTraceLog(const ConsoleCommandParams& /*params*/)
 
 void CmdPrintAllBreakpoints(const ConsoleCommandParams& /*params*/)
 {
-    const uint16_t* pbps = Emulator_GetCPUBreakpointList();
+    const uint16_t* pbps = BreakpointListHere();
     if (pbps == nullptr || *pbps == 0177777)
     {
         std::wcout << L" No breakpoints." << std::endl;
@@ -2003,7 +2034,7 @@ void CmdPrintAllBreakpoints(const ConsoleCommandParams& /*params*/)
 void CmdSetBreakpointAtAddress(const ConsoleCommandParams& params)
 {
     uint16_t address = params.paramOct1;
-    bool result = Emulator_AddCPUBreakpoint(address);
+    bool result = AddBreakpointHere(address);
     if (!result)
     {
         std::wcout << L" Failed to add breakpoint." << std::endl;
@@ -2054,7 +2085,7 @@ void CmdSetBreakpointByName(const ConsoleCommandParams& params)
         return;
     }
 
-    bool result = Emulator_AddCPUBreakpoint(address);
+    bool result = AddBreakpointHere(address);
     if (!result)
     {
         std::wcout << L" Failed to add breakpoint." << std::endl;
@@ -2068,7 +2099,7 @@ void CmdSetBreakpointByName(const ConsoleCommandParams& params)
 void CmdRemoveBreakpointAtAddress(const ConsoleCommandParams& params)
 {
     uint16_t address = params.paramOct1;
-    bool result = Emulator_RemoveCPUBreakpoint(address);
+    bool result = RemoveBreakpointHere(address);
     if (!result)
     {
         std::wcout << L" Failed to remove breakpoint." << std::endl;
