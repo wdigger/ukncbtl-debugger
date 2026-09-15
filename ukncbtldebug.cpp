@@ -33,6 +33,7 @@ struct Options
     int  port = 2345;
     int  frames = 0;
     bool okDebugCpu = true;
+    bool okBoot = false;
     bool okHelp = false;
 };
 
@@ -45,6 +46,8 @@ void PrintUsage()
         << L"  --rom FILE       the machine's firmware (default: uknc_rom.bin here)" << std::endl
         << L"  --port N         serve gdb on localhost:N (default: 2345)" << std::endl
         << L"  --ppu            debug the peripheral processor, not the central one" << std::endl
+        << L"  --boot           bring the operating system up before listening, so that" << std::endl
+        << L"                   gdb's \"load\" has something to run under" << std::endl
         << L"  --frames N       give up on a program that has run this long," << std::endl
         << L"                   in frames of 1/50 second (default: no limit)" << std::endl
         << L"  --help           this" << std::endl
@@ -84,6 +87,11 @@ bool ParseCommandLine(std::vector<std::wstring>& args, Options* options)
         if (arg == L"--ppu")
         {
             options->okDebugCpu = false;
+            continue;
+        }
+        if (arg == L"--boot")
+        {
+            options->okBoot = true;
             continue;
         }
 
@@ -171,6 +179,20 @@ int Run(std::vector<std::wstring>& args)
             Emulator_Done();
             return 1;
         }
+    }
+
+    if (options.okBoot)
+    {
+        // Long enough for this project's own firmware and disk, which
+        // reach the RT-11 prompt in about 700 frames.  Nothing types
+        // anything, so firmware that stops at a boot menu will still be
+        // sitting at it afterwards.
+        const int kBootFrames = 1200;
+
+        std::wcout << L"Booting..." << std::endl;
+        Emulator_Reset();
+        for (int i = 0; i < kBootFrames; i++)
+            Emulator_SystemFrame();
     }
 
     GdbServer_Run(options.port, options.okDebugCpu, options.frames);
