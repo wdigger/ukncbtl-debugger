@@ -23,7 +23,10 @@ extern uint16_t g_wEmulatorPrevPpuR[9];  // Previous PPU register values
 
 //////////////////////////////////////////////////////////////////////
 
-bool Emulator_Init();
+// Bring the machine up. `romFile` is the firmware image; empty means
+// uknc_rom.bin in the current directory, which is where it has always
+// been looked for.
+bool Emulator_Init(const std::wstring& romFile);
 void Emulator_Done();
 
 bool Emulator_AddCPUBreakpoint(uint16_t address);

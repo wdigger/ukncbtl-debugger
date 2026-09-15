@@ -1,5 +1,19 @@
-﻿// ukncbtldebug.cpp : This file contains the 'main' function. Program execution begins and ends there.
+// ukncbtldebug.cpp -- a UKNC for gdb to debug.
 //
+// The emulator core, and a server for gdb's remote protocol in front of
+// it.  There is no debugger of its own here: gdb is the debugger, and
+// everything this used to offer at a prompt of its own -- registers,
+// memory, breakpoints, stepping, disassembly, symbols, source lines --
+// gdb does better, over the wire, against the program's own source.
+//
+// So it takes its settings on the command line, starts the machine, and
+// waits:
+//
+//   ukncbtldebug --disk1 rt11.dsk --port 2345
+//   (gdb) target extended-remote :2345
+//
+// See README.md for the rest, and util/GdbServer.cpp for which of the
+// protocol it answers.
 
 #include "stdafx.h"
 #include <clocale>
@@ -7,87 +21,177 @@
 #include "ukncbtldebug.h"
 #include "Emulator.h"
 #include "emubase/Emubase.h"
-#include "commands.h"
-#include "util/console.h"
-
-
-//////////////////////////////////////////////////////////////////////
-// Preliminary function declarations
-
-int wmain_impl(std::vector<std::wstring>& wargs);
-
-void PrintWelcome();
-void PrintUsage();
-bool ParseCommandLine(std::vector<std::wstring>& wargs);
-
-
-//////////////////////////////////////////////////////////////////////
-// Globals
-
-#define OPTIONCHAR L'/'
-#define OPTIONSTR L"/"
+#include "util/GdbServer.h"
 
 
 //////////////////////////////////////////////////////////////////////
 
-
-void PrintWelcome()
+struct Options
 {
-    std::wcout << L"BKBTL emulator console debugger [" << __DATE__ << " " << __TIME__ << "]";
-    std::wcout << std::endl;
-}
+    std::wstring disks[4];
+    std::wstring rom;
+    int  port = 2345;
+    int  frames = 0;
+    bool okDebugCpu = true;
+    bool okHelp = false;
+};
 
 void PrintUsage()
 {
-    std::wcout << std::endl << L"Usage:" << std::endl;
-    std::wcout << std::endl
-            << L"  Options:" << std::endl
-            << L"    " << OPTIONSTR << L"TODO" << std::endl;
+    std::wcout
+        << L"ukncbtldebug -- a UKNC for gdb to debug" << std::endl
+        << std::endl
+        << L"  --disk1 FILE ... --disk4 FILE  attach a floppy image to a drive" << std::endl
+        << L"  --rom FILE       the machine's firmware (default: uknc_rom.bin here)" << std::endl
+        << L"  --port N         serve gdb on localhost:N (default: 2345)" << std::endl
+        << L"  --ppu            debug the peripheral processor, not the central one" << std::endl
+        << L"  --frames N       give up on a program that has run this long," << std::endl
+        << L"                   in frames of 1/50 second (default: no limit)" << std::endl
+        << L"  --help           this" << std::endl
+        << std::endl
+        << L"In gdb:  target extended-remote :PORT" << std::endl;
 }
 
-bool ParseCommandLine(std::vector<std::wstring>& wargs)
+// True if `arg` is the option `name`, which takes the value in `value`.
+bool TakesValue(const std::wstring& arg, const wchar_t* name,
+                std::vector<std::wstring>& args, size_t* index,
+                std::wstring* value)
 {
-    for (size_t argi = 0; argi < wargs.size(); argi++)
+    if (arg != name)
+        return false;
+    if (*index + 1 >= args.size())
     {
-        const std::wstring& warg = wargs[argi];
-        const wchar_t* arg = warg.c_str();
-        if (arg[0] == OPTIONCHAR)
+        std::wcout << L"Missing value for " << name << std::endl;
+        return false;
+    }
+    (*index)++;
+    *value = args[*index];
+    return true;
+}
+
+bool ParseCommandLine(std::vector<std::wstring>& args, Options* options)
+{
+    for (size_t i = 0; i < args.size(); i++)
+    {
+        const std::wstring& arg = args[i];
+        std::wstring value;
+
+        if (arg == L"--help" || arg == L"-h")
         {
-            if (wcscmp(arg + 1, L"sha1") == 0)
+            options->okHelp = true;
+            return true;
+        }
+        if (arg == L"--ppu")
+        {
+            options->okDebugCpu = false;
+            continue;
+        }
+
+        bool okDisk = false;
+        for (int slot = 0; slot < 4; slot++)
+        {
+            wchar_t name[8];
+            swprintf(name, 8, L"--disk%d", slot + 1);
+            if (TakesValue(arg, name, args, &i, &value))
             {
-                //TODO
+                options->disks[slot] = value;
+                okDisk = true;
+                break;
             }
-            else
+            if (arg == name)
+                return false;  // Named but without a value
+        }
+        if (okDisk)
+            continue;
+
+        if (TakesValue(arg, L"--rom", args, &i, &value))
+        {
+            options->rom = value;
+            continue;
+        }
+        if (TakesValue(arg, L"--port", args, &i, &value))
+        {
+            options->port = (int)wcstol(value.c_str(), nullptr, 10);
+            if (options->port <= 0 || options->port > 65535)
             {
-                std::wcout << L"Unknown option: " << arg << std::endl;
+                std::wcout << L"Not a port number: " << value << std::endl;
                 return false;
             }
+            continue;
         }
-        else
+        if (TakesValue(arg, L"--frames", args, &i, &value))
         {
+            options->frames = (int)wcstol(value.c_str(), nullptr, 10);
+            if (options->frames < 0)
             {
-                std::wcout << L"Unknown parameter: " << arg << std::endl;
+                std::wcout << L"Not a frame count: " << value << std::endl;
                 return false;
             }
+            continue;
         }
+
+        if (arg == L"--rom" || arg == L"--port" || arg == L"--frames")
+            return false;  // Named but without a value
+
+        std::wcout << L"Unknown option: " << arg << std::endl;
+        return false;
     }
 
     return true;
 }
 
+int Run(std::vector<std::wstring>& args)
+{
+    Options options;
+    if (!ParseCommandLine(args, &options))
+    {
+        PrintUsage();
+        return 255;
+    }
+    if (options.okHelp)
+    {
+        PrintUsage();
+        return 0;
+    }
+
+    if (!Emulator_Init(options.rom))
+    {
+        std::wcout << L"Failed to initialize emulator." << std::endl;
+        return 1;
+    }
+
+    for (int slot = 0; slot < 4; slot++)
+    {
+        if (options.disks[slot].empty())
+            continue;
+        std::string path = WStringToNarrowString(options.disks[slot]);
+        if (!Emulator_AttachFloppyImage(slot, path.c_str()))
+        {
+            std::wcout << L"Failed to attach " << options.disks[slot] << std::endl;
+            Emulator_Done();
+            return 1;
+        }
+    }
+
+    GdbServer_Run(options.port, options.okDebugCpu, options.frames);
+
+    Emulator_Done();
+    return 0;
+}
+
+
+//////////////////////////////////////////////////////////////////////
+
 #ifdef _MSC_VER
 int wmain(int argc, wchar_t* argv[])
 {
-    // Console output mode
     _setmode(_fileno(stdout), _O_U16TEXT);
 
-    std::vector<std::wstring> wargs;
+    std::vector<std::wstring> args;
     for (int argn = 1; argn < argc; argn++)
-    {
-        wargs.push_back(std::wstring(argv[argn]));
-    }
+        args.push_back(std::wstring(argv[argn]));
 
-    return wmain_impl(wargs);
+    return Run(args);
 }
 #else
 
@@ -129,13 +233,13 @@ std::wstring Utf8ToWString(const char* s)
 
 int main(int argc, char* argv[])
 {
-    // Console output mode.  Prefer the environment's locale (for correct
-    // wide/UTF-8 console I/O), but some platforms advertise a locale via
-    // LANG/LC_ALL that their C++ runtime can't actually construct (seen on
-    // macOS with a Homebrew-built libstdc++: std::locale("") throws even
-    // though std::setlocale(LC_ALL, "") -- a plain libc call -- succeeds
-    // for the same name) -- fall back to the classic "C" locale rather
-    // than crash the whole program over console cosmetics.
+    // Prefer the environment's locale (for correct wide/UTF-8 console
+    // I/O), but some platforms advertise a locale via LANG/LC_ALL that
+    // their C++ runtime can't actually construct (seen on macOS with a
+    // Homebrew-built libstdc++: std::locale("") throws even though
+    // std::setlocale(LC_ALL, "") -- a plain libc call -- succeeds for the
+    // same name) -- fall back to the classic "C" locale rather than crash
+    // the whole program over console cosmetics.
     std::setlocale(LC_ALL, "");
     try
     {
@@ -146,75 +250,10 @@ int main(int argc, char* argv[])
         std::wcout.imbue(std::locale::classic());
     }
 
-    std::vector<std::wstring> wargs;
+    std::vector<std::wstring> args;
     for (int argn = 1; argn < argc; argn++)
-    {
-        wargs.push_back(Utf8ToWString(argv[argn]));
-    }
+        args.push_back(Utf8ToWString(argv[argn]));
 
-    return wmain_impl(wargs);
+    return Run(args);
 }
 #endif
-
-int wmain_impl(std::vector<std::wstring>& wargs)
-{
-    Console_ColorInit();
-
-    PrintWelcome();
-
-    if (!ParseCommandLine(wargs))
-    {
-        PrintUsage();
-        return 255;
-    }
-
-    if (!Emulator_Init())
-    {
-        std::wcout << L"Failed to initialize emulator." << std::endl;
-        return 1;
-    }
-
-    std::wcout << L"Use 'h' command to show help." << std::endl;
-
-    std::wstring line;
-    for (;;)
-    {
-        if (HasPendingContinuation())
-        {
-            // The "-- more --" prompt was already printed by the command
-            // that armed the continuation (or by the previous iteration of
-            // this branch); just read the response here.
-            if (!std::getline(std::wcin, line))
-                break;  // EOF (Ctrl+D / Ctrl+Z)
-
-            if (line.empty())
-            {
-                RunPendingContinuation();  // Re-arms for the next page
-                continue;
-            }
-
-            // Any other input is just "stop paging" -- it answers the
-            // prompt, it is not a command line. Discard it and go back to
-            // the normal prompt, so typing anything other than Enter to
-            // get out of the pager can never accidentally run a command.
-            ClearPendingContinuation();
-            continue;
-        }
-
-        PrintConsolePrompt();
-        if (!std::getline(std::wcin, line))
-            break;  // EOF (Ctrl+D / Ctrl+Z)
-
-        if (!DoConsoleCommand(line))
-            break;
-    }
-
-    Emulator_SoundRecordStop();  // a forgotten "soundstop" still leaves a playable file
-    Emulator_Done();
-
-    std::wcout << std::endl << L"Done." << std::endl;
-    return 0;
-}
-
-
-//////////////////////////////////////////////////////////////////////

@@ -24,9 +24,6 @@
     <ClCompile Include="Common.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="commands.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Emulator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -43,21 +40,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="emubase\SoundAY.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="util\BitmapFile.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="util\console.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="util\Symbols.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="util\ElfFile.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="util\Dwarf.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="util\GdbServer.cpp">
@@ -77,9 +59,6 @@
     <ClInclude Include="Common.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="commands.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="Emulator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -96,21 +75,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="emubase\Processor.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="util\BitmapFile.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="util\console.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="util\Symbols.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="util\ElfFile.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="util\Dwarf.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="util\GdbServer.h">

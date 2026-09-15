@@ -19,7 +19,6 @@ TARGET   := ukncbtldebug
 SRCS := \
 	ukncbtldebug.cpp \
 	Common.cpp \
-	commands.cpp \
 	Emulator.cpp \
 	stdafx.cpp \
 	emubase/Board.cpp \
@@ -29,11 +28,6 @@ SRCS := \
 	emubase/Memory.cpp \
 	emubase/Processor.cpp \
 	emubase/SoundAY.cpp \
-	util/BitmapFile.cpp \
-	util/console.cpp \
-	util/Symbols.cpp \
-	util/ElfFile.cpp \
-	util/Dwarf.cpp \
 	util/GdbServer.cpp
 
 INCLUDES := -I.

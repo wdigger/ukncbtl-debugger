@@ -33,9 +33,3 @@
 // Returns when gdb disconnects, or immediately if the port cannot be
 // listened on.
 void GdbServer_Run(int port, bool okDebugCpu, int maxFrames);
-
-// Type an ASCII line on the machine's keyboard, pumping frames so the
-// machine consumes it -- "R T\r" and the like. Implemented by the console
-// (commands.cpp), which owns the key tables; declared here so that the
-// protocol code does not have to reach into them.
-void GdbServer_TypeLine(const std::string& text);

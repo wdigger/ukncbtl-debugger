@@ -70,7 +70,7 @@ const uint32_t ScreenView_StandardGRBColors[16 * 8] =
 
 //////////////////////////////////////////////////////////////////////
 
-bool Emulator_Init()
+bool Emulator_Init(const std::wstring& romFile)
 {
     ASSERT(g_pBoard == nullptr);
 
@@ -97,10 +97,13 @@ bool Emulator_Init()
 
     // Load ROM file
     memset(buffer, 0, 32768);
-    FILE* fpRomFile = ::fopen("uknc_rom.bin", "rb");
+    std::string romPath = romFile.empty()
+        ? std::string("uknc_rom.bin")
+        : WStringToNarrowString(romFile);
+    FILE* fpRomFile = ::fopen(romPath.c_str(), "rb");
     if (fpRomFile == nullptr)
     {
-        AlertWarning(_T("Could not open ROM file uknc_rom.bin"));
+        std::wcout << L"Could not open ROM file " << romPath.c_str() << std::endl;
         return false;
     }
     size_t bytesToRead = 32256;
@@ -108,9 +111,10 @@ bool Emulator_Init()
     if (dwBytesRead != bytesToRead)
     {
         ::fclose(fpRomFile);
-        AlertWarning(_T("Could not read ROM file data uknc_rom.bin"));
+        std::wcout << L"Could not read ROM file " << romPath.c_str() << std::endl;
         return false;
     }
+    ::fclose(fpRomFile);
 
     g_pBoard->LoadROM(buffer);
 

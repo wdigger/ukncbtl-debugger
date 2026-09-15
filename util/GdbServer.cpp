@@ -120,6 +120,62 @@ CProcessor* Proc()
 }
 
 //////////////////////////////////////////////////////////////////////
+// Typing, for starting a program the way a person would
+
+// The machine's keyboard sends hardware matrix scan-codes, not
+// characters, so the few characters an RT-11 command line is made of
+// have to be looked up. Letters are the Latin glyph on the key. From
+// UKNCBTL's own emulator/KeyboardView.cpp.
+struct KeyForChar
+{
+    char ch;
+    uint8_t scancode;
+};
+
+const KeyForChar KEYS_FOR_CHARS[] =
+{
+    { 'A', 0072 }, { 'B', 0076 }, { 'C', 0050 }, { 'D', 0057 },
+    { 'E', 0033 }, { 'F', 0047 }, { 'G', 0055 }, { 'H', 0156 },
+    { 'I', 0073 }, { 'J', 0027 }, { 'K', 0052 }, { 'L', 0056 },
+    { 'M', 0112 }, { 'N', 0054 }, { 'O', 0075 }, { 'P', 0053 },
+    { 'Q', 0067 }, { 'R', 0074 }, { 'S', 0111 }, { 'T', 0114 },
+    { 'U', 0051 }, { 'V', 0137 }, { 'W', 0071 }, { 'X', 0115 },
+    { 'Y', 0070 }, { 'Z', 0157 },
+    { '0', 0176 }, { '1', 0030 }, { '2', 0031 }, { '3', 0032 },
+    { '4', 0013 }, { '5', 0034 }, { '6', 0035 }, { '7', 0016 },
+    { '8', 0017 }, { '9', 0177 },
+    { '.', 0135 }, { ',', 0117 }, { ';', 0007 }, { ':', 0174 },
+    { '-', 0175 }, { '/', 0173 },
+    { ' ', 0113 },  // SPACE
+    { '\r', 0153 },  // ENTER
+};
+
+// Enough frames around each press and release for the machine to see it.
+const int KEY_HOLD_FRAMES = 6;
+
+void TypeLine(const std::string& text)
+{
+    for (char ch : text)
+    {
+        char wanted = (ch == '\n') ? '\r' : (char)toupper((unsigned char)ch);
+
+        for (const KeyForChar& key : KEYS_FOR_CHARS)
+        {
+            if (key.ch != wanted)
+                continue;
+
+            Emulator_KeyEvent(key.scancode, true);
+            for (int i = 0; i < KEY_HOLD_FRAMES; i++)
+                g_pBoard->SystemFrame();
+            Emulator_KeyEvent(key.scancode, false);
+            for (int i = 0; i < KEY_HOLD_FRAMES; i++)
+                g_pBoard->SystemFrame();
+            break;
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////
 // Hex, which every value in the protocol is written in
 
 const char* const HEX_DIGITS = "0123456789abcdef";
@@ -516,7 +572,7 @@ bool StartProgram(const std::string& name, std::string* error)
     for (int i = 0; i < kBootFrames; i++)
         g_pBoard->SystemFrame();
 
-    GdbServer_TypeLine("R " + name + "\r");
+    TypeLine("R " + name + "\r");
 
     g_okProgramExited = false;
 
