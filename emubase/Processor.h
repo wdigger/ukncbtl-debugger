@@ -34,6 +34,18 @@ public:  // Constructor / initialization
     /// \brief Get the processor name, assigned in the constructor
     LPCTSTR     GetName() const { return m_name; }
 
+    /// \brief Observer for EMT instructions, called as one is executed,
+    ///        with the processor and the EMT's own code (the low byte of
+    ///        the instruction).
+    ///
+    /// The operating system's services are EMTs, so this is where a
+    /// debugger can see a program ask for one -- .TTYOUT to write a
+    /// character, .EXIT to finish -- without changing what happens: the
+    /// trap is taken exactly as before.  One observer at a time, shared
+    /// by both processors; nullptr to remove it.
+    typedef void (*EMTCALLBACK)(CProcessor* pProc, uint8_t code);
+    static void SetEMTCallback(EMTCALLBACK callback) { m_EMTCallback = callback; }
+
 public:
     static void Init();  ///< Initialize static tables
     static void Done();  ///< Release memory used for static tables
@@ -43,6 +55,7 @@ protected:  // Statics
 
 protected:  // Processor state
     TCHAR       m_name[5];          ///< Processor name (DO NOT use it inside the processor code!!!)
+    static EMTCALLBACK m_EMTCallback;  ///< See SetEMTCallback
     uint16_t    m_internalTick;     ///< How many ticks waiting to the end of current instruction
     uint16_t    m_psw;              ///< Processor Status Word (PSW)
     uint16_t    m_R[8];             ///< Registers (R0..R5, R6=SP, R7=PC)

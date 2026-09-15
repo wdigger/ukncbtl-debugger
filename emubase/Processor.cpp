@@ -2498,8 +2498,13 @@ void CProcessor::ExecuteSUB()  // SUB
     m_internalTick = MOVB_TIMING[m_methsrc][m_methdest];
 }
 
+CProcessor::EMTCALLBACK CProcessor::m_EMTCallback = nullptr;
+
 void CProcessor::ExecuteEMT()  // EMT - emulator trap
 {
+    if (m_EMTCallback != nullptr)
+        m_EMTCallback(this, (uint8_t)(m_instruction & 0xff));
+
     m_EMT_rq = true;
     m_internalTick = EMT_TIMING;
 }

@@ -242,9 +242,47 @@ $1 = 55
 #1  0x000002aa in main () at g2.c:13
 ```
 
+`run` works too, through `target extended-remote`. RT-11 loads programs,
+not gdb, so starting one means what a person would do -- reset, wait for
+the system, type `R NAME` -- and the server does that and stops at the
+entry point:
+
+```
+(gdb) target extended-remote :2345
+(gdb) set remote exec-file T
+(gdb) break main
+(gdb) run
+Breakpoint 1, main () at g2.c:12
+(gdb) continue
+55 210
+[Inferior 1 (Remote target) exited normally]
+```
+
+The program's output appears there because the server watches the
+machine's `.TTYOUT` calls and forwards them; it still goes to the
+emulated screen as well. The same watching is how gdb is told the
+program finished: `.EXIT` is what RT-11 programs end with.
+
+That needs the autoboot firmware (`rom/uknc_rom_autoboot.bin` in the
+toolchain), since nothing types answers to the stock firmware's boot
+menu.
+
+`load` is the other way in, and does not need the program to be on the
+disk at all -- gdb writes it straight into memory and sets the entry
+point:
+
+```
+(gdb) target extended-remote :2345
+(gdb) load
+Loading section .text, size 0x32f8 lma 0x200
+(gdb) continue
+```
+
 Registers, memory, breakpoints, stepping, frames, arguments and locals
 all work; the last three come from the call frame information the
-compiler emits, so they need `-g`. Two things to know:
+compiler emits, so they need `-g`. Stepping a line uses gdb's range
+stepping, so `next` is one exchange rather than one per instruction.
+Two things to know:
 
 - `continue` with nothing to stop it runs until gdb interrupts it
   (Ctrl-C), the connection drops, or the process is killed. There is no

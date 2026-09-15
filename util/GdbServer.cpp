@@ -48,6 +48,16 @@ namespace {
 //                  than the fallbacks it tries when it gets none.
 //   qSupported, qAttached
 //                  the opening negotiation
+//   !, vRun, R     extended mode: starting and restarting a program.
+//                  RT-11 loads programs, not gdb, so "start" here means
+//                  what a person would do -- reset, let the system come
+//                  up, type "R NAME" -- stopping at the entry point.
+//   vCont, vCont?  resume, with range stepping (see RangeStep below)
+//   X              binary memory write, which is what "load" uses
+//
+// and one packet sent the other way, unasked: O, which carries whatever
+// the program writes to the console so that it appears in gdb's terminal
+// as well as on the machine's screen.
 //
 // Everything else gets an empty reply, which is the protocol's way of
 // saying "not implemented" and is always a valid answer.
@@ -58,6 +68,38 @@ socket_t g_socket = INVALID_SOCKET_VALUE;
 // the two have separate address spaces and separate breakpoint lists,
 // and gdb has one of each.
 bool g_okDebugCpu = true;
+
+// Set by the "!" packet. gdb sends it when connected with "target
+// extended-remote", and will not offer "run" without it.
+bool g_okExtended = false;
+
+// The RT-11 name of the program to start, remembered from the last vRun
+// so that "R" -- which carries no name -- can restart the same one.
+std::string g_programName;
+
+// The operating system's services are EMTs; watching them is how the
+// server knows the program has finished and what it has printed.
+const uint8_t EMT_TTYOUT = 0341;   // .TTYOUT -- one character, in R0
+const uint8_t EMT_EXIT   = 0350;   // .EXIT   -- back to the monitor
+
+// Filled in by the EMT observer, which runs deep inside instruction
+// execution and must not do anything slow there; the frame loop sends
+// this on and clears it.
+std::string g_consoleOutput;
+bool g_okProgramExited = false;
+
+void EmtObserver(CProcessor* pProc, uint8_t code)
+{
+    // Only the processor this session is debugging; the other one's
+    // traps are its own business.
+    if ((pProc == g_pBoard->GetCPU()) != g_okDebugCpu)
+        return;
+
+    if (code == EMT_TTYOUT)
+        g_consoleOutput.push_back((char)(pProc->GetReg(0) & 0xff));
+    else if (code == EMT_EXIT)
+        g_okProgramExited = true;
+}
 
 CProcessor* Proc()
 {
@@ -298,6 +340,20 @@ bool RemoveBreakpoint(uint16_t address)
 // Run until a breakpoint is hit or gdb interrupts. Returns the signal to
 // report: 5 for a trap (which is what a breakpoint is), 2 for an
 // interrupt.
+// Hand gdb whatever the program has printed since last time, as an "O"
+// packet -- the one thing a stub may send while the program is running.
+void FlushConsoleOutput()
+{
+    if (g_consoleOutput.empty())
+        return;
+
+    std::string hex;
+    for (char ch : g_consoleOutput)
+        AppendByte(hex, (uint8_t)ch);
+    g_consoleOutput.clear();
+    SendPacket("O" + hex);
+}
+
 int RunUntilStop()
 {
     // Resuming from an address that has a breakpoint on it would trip
@@ -311,10 +367,19 @@ int RunUntilStop()
     Emulator_Start();
     int signal = 5;
 
+    g_okProgramExited = false;
+
     while (g_okEmulatorRunning)
     {
-        if (!Emulator_SystemFrame())
-            break;  // Breakpoint
+        bool okHitBreakpoint = !Emulator_SystemFrame();
+        FlushConsoleOutput();
+        if (okHitBreakpoint)
+            break;
+        if (g_okProgramExited)
+        {
+            signal = -1;  // Not a stop: the program is gone
+            break;
+        }
 
         int ch = RecvByte(false);
         if (ch == 0x03)
@@ -334,6 +399,125 @@ int RunUntilStop()
     return signal;
 }
 
+// Single-step while the program counter stays inside [low, high), which
+// is what gdb's range stepping asks for: it saves a round trip per
+// instruction when stepping over a line's worth of code.
+//
+// Stops early on a breakpoint, on gdb interrupting, and on a cap, since
+// stepping does not advance the frame timer and code waiting on it would
+// never leave the range.
+int RangeStep(uint16_t low, uint16_t high)
+{
+    const long kMaxInstructions = 2000000;
+
+    for (long executed = 0; executed < kMaxInstructions; executed++)
+    {
+        g_pBoard->DebugTicks();
+
+        uint16_t pc = Proc()->GetPC();
+        if (Emulator_IsBreakpoint(g_okDebugCpu, pc))
+            break;
+        if (pc < low || pc >= high)
+            break;
+
+        int ch = RecvByte(false);
+        if (ch == 0x03 || ch == -1)
+        {
+            Emulator_OnUpdate();
+            return 2;
+        }
+    }
+
+    Emulator_OnUpdate();
+    return 5;
+}
+
+// Turn the file name gdb sent into something RT-11 will answer to: the
+// last path component, without its extension, upper case, six characters
+// at most. "build/hello.sav" becomes "HELLO".
+std::string Rt11NameFromPath(const std::string& path)
+{
+    size_t slash = path.find_last_of("/\\");
+    std::string name = (slash == std::string::npos) ? path : path.substr(slash + 1);
+
+    size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0)
+        name.erase(dot);
+
+    if (name.size() > 6)
+        name.erase(6);
+    for (char& ch : name)
+        ch = (char)toupper((unsigned char)ch);
+    return name;
+}
+
+// Start a program the way a person would: reset, wait for RT-11, type
+// "R NAME", and stop at the entry point. A .sav is an absolute image
+// loaded at 001000, so that is where every program here begins.
+//
+// Returns false with a reason if it does not get there, which usually
+// means the firmware stopped at its boot menu -- "run" needs the
+// autoboot firmware, since nothing types the menu's answers.
+bool StartProgram(const std::string& name, std::string* error)
+{
+    const int kBootFrames = 1200;      // ~700 is enough for the autoboot ROM
+    const int kProgramFrames = 600;    // for RT-11 to find and load the file
+    const uint16_t kEntryPoint = 01000;
+
+    if (name.empty())
+    {
+        *error = "no program to run: say \"set remote exec-file NAME\" in gdb";
+        return false;
+    }
+
+    Emulator_Reset();
+    for (int i = 0; i < kBootFrames; i++)
+        g_pBoard->SystemFrame();
+
+    GdbServer_TypeLine("R " + name + "\r");
+
+    g_okProgramExited = false;
+
+    Emulator_SetTempCPUBreakpoint(kEntryPoint);
+    Emulator_Start();
+    bool okStarted = false;
+    for (int i = 0; i < kProgramFrames && g_okEmulatorRunning; i++)
+    {
+        if (!Emulator_SystemFrame())
+        {
+            okStarted = true;
+            break;
+        }
+    }
+    Emulator_Stop();
+    Emulator_OnUpdate();
+
+    // Everything printed up to here is the operating system's -- the
+    // echo of the "R NAME" just typed -- and not the program's.
+    g_consoleOutput.clear();
+
+    if (!okStarted)
+    {
+        *error = "the machine never reached the program: is this the autoboot "
+                 "firmware, and is " + name + " on the disk?";
+        return false;
+    }
+    return true;
+}
+
+// The stop reply for a signal, or -- when the program has run to the end
+// -- the "W" reply that tells gdb the process is gone. RT-11's .EXIT
+// carries no status, so it is reported as zero.
+std::string StopReply(int signal)
+{
+    if (signal < 0)
+        return "W00";
+
+    char buffer[8];
+    snprintf(buffer, sizeof (buffer), "S%02x", signal);
+    return buffer;
+}
+
 //////////////////////////////////////////////////////////////////////
 
 // Answer one packet. Returns false when the session is over.
@@ -346,6 +530,21 @@ bool HandlePacket(const std::string& packet)
 
     switch (packet[0])
     {
+    case '!':
+        g_okExtended = true;
+        return SendPacket("OK");
+
+    case 'R':
+        {
+            // Restart. The argument is required by the protocol and
+            // ignored by everyone; there is no reply either way.
+            std::string error;
+            if (!StartProgram(g_programName, &error))
+                std::wcout << L" gdb: " << std::wstring(error.begin(), error.end())
+                           << std::endl;
+            return true;
+        }
+
     case '?':
         // Whatever put us here, gdb wants a stop reason; the machine is
         // sitting at a console prompt, which is a trap as far as it is
@@ -431,6 +630,38 @@ bool HandlePacket(const std::string& packet)
             return SendPacket("OK");
         }
 
+    case 'X':
+        {
+            // Binary memory write, which is what "load" uses -- one byte
+            // per byte rather than two hex digits. '}' escapes the next
+            // character, which is the original XOR 0x20; that is how $,
+            // #, } and * are kept out of the payload.
+            size_t pos = 1;
+            uint32_t address, length;
+            if (!ParseNumber(packet, &pos, &address)
+                || !Expect(packet, &pos, ',')
+                || !ParseNumber(packet, &pos, &length)
+                || !Expect(packet, &pos, ':'))
+                return SendPacket("E01");
+
+            uint32_t written = 0;
+            while (pos < packet.size() && written < length)
+            {
+                uint8_t value = (uint8_t)packet[pos++];
+                if (value == '}')
+                {
+                    if (pos >= packet.size())
+                        return SendPacket("E01");
+                    value = (uint8_t)(packet[pos++] ^ 0x20);
+                }
+                WriteMemoryByte((uint16_t)(address + written), value);
+                written++;
+            }
+            if (written != length)
+                return SendPacket("E01");
+            return SendPacket("OK");
+        }
+
     case 'c':
         {
             // An address after the "c" means "resume there instead".
@@ -441,10 +672,7 @@ bool HandlePacket(const std::string& packet)
                 if (ParseNumber(packet, &pos, &address))
                     Proc()->SetReg(7, (uint16_t)address);
             }
-            int signal = RunUntilStop();
-            char buffer[8];
-            snprintf(buffer, sizeof (buffer), "S%02x", signal);
-            return SendPacket(buffer);
+            return SendPacket(StopReply(RunUntilStop()));
         }
 
     case 's':
@@ -480,6 +708,75 @@ bool HandlePacket(const std::string& packet)
             return SendPacket(okDone ? "OK" : "E01");
         }
 
+    case 'v':
+        {
+            if (packet == "vCont?")
+                return SendPacket("vCont;c;C;s;S;t;r");
+
+            if (packet.compare(0, 6, "vCont;") == 0)
+            {
+                // Only the first action is honoured: there is one thread,
+                // so the rest could only repeat it.
+                size_t pos = 6;
+                char action = packet[pos++];
+
+                if (action == 'r')
+                {
+                    uint32_t low, high;
+                    if (!ParseNumber(packet, &pos, &low)
+                        || !Expect(packet, &pos, ',')
+                        || !ParseNumber(packet, &pos, &high))
+                        return SendPacket("E01");
+                    return SendPacket(StopReply(RangeStep((uint16_t)low,
+                                                          (uint16_t)high)));
+                }
+                if (action == 's' || action == 'S')
+                {
+                    g_pBoard->DebugTicks();
+                    Emulator_OnUpdate();
+                    return SendPacket("S05");
+                }
+                if (action == 'c' || action == 'C')
+                    return SendPacket(StopReply(RunUntilStop()));
+                if (action == 't')
+                    return SendPacket("S02");
+                return SendPacket("E01");
+            }
+
+            if (packet.compare(0, 5, "vRun;") == 0)
+            {
+                // The file name is hex-encoded, and empty means "the one
+                // from last time".
+                std::string path;
+                size_t pos = 5;
+                while (pos + 1 < packet.size() && packet[pos] != ';')
+                {
+                    int high = HexValue(packet[pos]);
+                    int low = HexValue(packet[pos + 1]);
+                    if (high < 0 || low < 0)
+                        return SendPacket("E01");
+                    path.push_back((char)((high << 4) | low));
+                    pos += 2;
+                }
+                if (!path.empty())
+                    g_programName = Rt11NameFromPath(path);
+
+                std::string error;
+                if (!StartProgram(g_programName, &error))
+                {
+                    std::wcout << L" gdb: " << std::wstring(error.begin(), error.end())
+                               << std::endl;
+                    return SendPacket("E01");
+                }
+                return SendPacket("S05");
+            }
+
+            if (packet.compare(0, 6, "vKill;") == 0)
+                return SendPacket("OK");
+
+            return SendPacket("");
+        }
+
     case 'H':
         // "Use thread N for the following operations." There is one.
         return SendPacket("OK");
@@ -493,7 +790,7 @@ bool HandlePacket(const std::string& packet)
 
     case 'q':
         if (packet.compare(0, 10, "qSupported") == 0)
-            return SendPacket("PacketSize=1000");
+            return SendPacket("PacketSize=1000;vContSupported+;swbreak+");
         if (packet == "qAttached")
             return SendPacket("1");   // Already running; do not kill on detach
         if (packet == "qC")
@@ -573,6 +870,10 @@ void GdbServer_Run(int port, bool okDebugCpu)
     setsockopt(g_socket, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof (one));
     std::wcout << L"gdb connected." << std::endl;
 
+    g_consoleOutput.clear();
+    g_okProgramExited = false;
+    CProcessor::SetEMTCallback(EmtObserver);
+
     for (;;)
     {
         std::string packet;
@@ -590,6 +891,7 @@ void GdbServer_Run(int port, bool okDebugCpu)
             break;
     }
 
+    CProcessor::SetEMTCallback(nullptr);
     CloseSocket(g_socket);
     g_socket = INVALID_SOCKET_VALUE;
     std::wcout << L"gdb disconnected." << std::endl;

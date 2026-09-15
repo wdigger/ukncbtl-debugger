@@ -1897,6 +1897,26 @@ void ClickKey(uint8_t scancode)
     SetKeyState(scancode, false, KEY_HOLD_FRAMES);
 }
 
+// See GdbServer.h: type a line for the gdb server, which starts programs
+// by typing "R NAME" at the RT-11 prompt just as a person would.
+void GdbServer_TypeLine(const std::string& text)
+{
+    for (char ch : text)
+    {
+        std::wstring name;
+        if (ch == ' ')
+            name = L"SPACE";
+        else if (ch == '\r' || ch == '\n')
+            name = L"ENTER";
+        else
+            name = std::wstring(1, (wchar_t)ch);
+
+        uint8_t scancode;
+        if (FindNamedKey(name, &scancode))
+            ClickKey(scancode);
+    }
+}
+
 // Parse "KEY" or "MOD+KEY" out of params.commandText, given the prefix
 // length the matched table row consumed (params.paramPrefixLength, set by
 // MatchCommand -- this is the single source of truth for where the key
