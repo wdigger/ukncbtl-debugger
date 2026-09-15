@@ -1096,27 +1096,46 @@ void CmdLoadSymbols(const ConsoleCommandParams& params)
         std::wcout << L"FAILED to load symbols from " << params.paramFilename << std::endl;
 }
 
-// "gdbserver [PORT]" -- let gdb drive the machine over its own remote
-// protocol, for the processor the "p" command is currently on. Blocks
-// until gdb disconnects: while it is attached it owns the machine, and
-// answering console commands at the same time would mean two debuggers
-// stepping one processor.
+// "gdbserver [PORT [MAXFRAMES]]" -- let gdb drive the machine over its
+// own remote protocol, for the processor the "p" command is currently
+// on. Blocks until gdb disconnects: while it is attached it owns the
+// machine, and answering console commands at the same time would mean
+// two debuggers stepping one processor.
+//
+// MAXFRAMES bounds a single continue, for a harness that must not wait
+// on a program that never ends; at a keyboard there is Ctrl-C and no
+// reason for a bound, which is the default.
 void CmdGdbServer(const ConsoleCommandParams& params)
 {
     const int kDefaultPort = 2345;
 
     int port = kDefaultPort;
+    int maxFrames = 0;
+
     if (!params.paramFilename.empty())
     {
-        port = (int)wcstol(params.paramFilename.c_str(), nullptr, 10);
-        if (port <= 0 || port > 65535)
+        wchar_t* rest = nullptr;
+        long value = wcstol(params.paramFilename.c_str(), &rest, 10);
+        if (value <= 0 || value > 65535)
         {
             std::wcout << L" Not a port number: " << params.paramFilename << std::endl;
             return;
         }
+        port = (int)value;
+
+        if (rest != nullptr && *rest != L'\0')
+        {
+            long frames = wcstol(rest, nullptr, 10);
+            if (frames < 0)
+            {
+                std::wcout << L" Not a frame count: " << rest << std::endl;
+                return;
+            }
+            maxFrames = (int)frames;
+        }
     }
 
-    GdbServer_Run(port, m_okCurrentProc);
+    GdbServer_Run(port, m_okCurrentProc, maxFrames);
 }
 
 // "symbols" / "sym" -- list the currently loaded symbol table.

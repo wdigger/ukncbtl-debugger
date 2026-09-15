@@ -56,8 +56,9 @@ namespace {
 //   X              binary memory write, which is what "load" uses
 //
 // and one packet sent the other way, unasked: O, which carries whatever
-// the program writes to the console so that it appears in gdb's terminal
-// as well as on the machine's screen.
+// the program writes to the console -- taken off the channel to the
+// peripheral processor -- so that it appears in gdb's terminal as well
+// as on the machine's screen.
 //
 // Everything else gets an empty reply, which is the protocol's way of
 // saying "not implemented" and is always a valid answer.
@@ -77,16 +78,30 @@ bool g_okExtended = false;
 // so that "R" -- which carries no name -- can restart the same one.
 std::string g_programName;
 
-// The operating system's services are EMTs; watching them is how the
-// server knows the program has finished and what it has printed.
-const uint8_t EMT_TTYOUT = 0341;   // .TTYOUT -- one character, in R0
-const uint8_t EMT_EXIT   = 0350;   // .EXIT   -- back to the monitor
+// See GdbServer.h: how long one continue may run, in frames.
+int g_maxFrames = 0;
 
-// Filled in by the EMT observer, which runs deep inside instruction
-// execution and must not do anything slow there; the frame loop sends
-// this on and clears it.
+// .EXIT, the operating-system call an RT-11 program ends with. There is
+// no other sign that it has: the monitor simply takes over.
+const uint8_t EMT_EXIT = 0350;
+
+// Filled in by the two observers below, which run deep inside
+// instruction execution and must not do anything slow there; the frame
+// loop sends this on and clears it.
 std::string g_consoleOutput;
 bool g_okProgramExited = false;
+
+// Console output, taken where the central processor hands a byte to the
+// peripheral one -- channel 0 is the terminal.
+//
+// Not where the program asks for it: .TTYOUT reports failure when the
+// console is busy and newlib retries the same character until it is
+// taken, so watching the calls counts one character hundreds of times.
+// This is the byte itself, once.
+void CALLBACK TerminalObserver(uint8_t byte)
+{
+    g_consoleOutput.push_back((char)byte);
+}
 
 void EmtObserver(CProcessor* pProc, uint8_t code)
 {
@@ -95,9 +110,7 @@ void EmtObserver(CProcessor* pProc, uint8_t code)
     if ((pProc == g_pBoard->GetCPU()) != g_okDebugCpu)
         return;
 
-    if (code == EMT_TTYOUT)
-        g_consoleOutput.push_back((char)(pProc->GetReg(0) & 0xff));
-    else if (code == EMT_EXIT)
+    if (code == EMT_EXIT)
         g_okProgramExited = true;
 }
 
@@ -340,6 +353,11 @@ bool RemoveBreakpoint(uint16_t address)
 // Run until a breakpoint is hit or gdb interrupts. Returns the signal to
 // report: 5 for a trap (which is what a breakpoint is), 2 for an
 // interrupt.
+// How a resume ended, in the values RunUntilStop returns: a signal the
+// program stopped for, or one of these.
+const int STOPPED_EXITED = -1;    // The program called .EXIT
+const int STOPPED_TIMEOUT = -2;   // It ran past the frame bound
+
 // Hand gdb whatever the program has printed since last time, as an "O"
 // packet -- the one thing a stub may send while the program is running.
 void FlushConsoleOutput()
@@ -369,15 +387,39 @@ int RunUntilStop()
 
     g_okProgramExited = false;
 
+    int frames = 0;
     while (g_okEmulatorRunning)
     {
+        if (g_maxFrames > 0 && frames >= g_maxFrames)
+        {
+            signal = STOPPED_TIMEOUT;
+            break;
+        }
+        frames++;
+
         bool okHitBreakpoint = !Emulator_SystemFrame();
         FlushConsoleOutput();
         if (okHitBreakpoint)
             break;
         if (g_okProgramExited)
         {
-            signal = -1;  // Not a stop: the program is gone
+            // .EXIT happens while the last of what was written is
+            // still in the operating system's console buffer, on its
+            // way to the peripheral processor a byte at a time -- and
+            // slowly, a program that has printed a page of text having
+            // queued far more than it has delivered. Keep going until
+            // the trickle stops, or the end of the output is lost.
+            const int kDrainMaxFrames = 900;
+            const int kDrainIdleFrames = 250;
+            int idle = 0;
+            for (int i = 0; i < kDrainMaxFrames && idle < kDrainIdleFrames; i++)
+            {
+                size_t before = g_consoleOutput.size();
+                Emulator_SystemFrame();
+                idle = (g_consoleOutput.size() == before) ? idle + 1 : 0;
+                FlushConsoleOutput();
+            }
+            signal = STOPPED_EXITED;
             break;
         }
 
@@ -505,13 +547,19 @@ bool StartProgram(const std::string& name, std::string* error)
     return true;
 }
 
-// The stop reply for a signal, or -- when the program has run to the end
-// -- the "W" reply that tells gdb the process is gone. RT-11's .EXIT
-// carries no status, so it is reported as zero.
+// The stop reply for one of those.
+//
+// A timeout is reported as "terminated by SIGALRM" rather than "stopped
+// with SIGALRM", because gdb passes that signal on and resumes -- which
+// against a program that is not going to stop means resuming for ever.
+// Terminated leaves nothing to resume, which is what giving up means.
+// RT-11's .EXIT carries no status, so a program that ended reports zero.
 std::string StopReply(int signal)
 {
-    if (signal < 0)
+    if (signal == STOPPED_EXITED)
         return "W00";
+    if (signal == STOPPED_TIMEOUT)
+        return "X0e";
 
     char buffer[8];
     snprintf(buffer, sizeof (buffer), "S%02x", signal);
@@ -834,7 +882,7 @@ socket_t Listen(int port)
 
 //////////////////////////////////////////////////////////////////////
 
-void GdbServer_Run(int port, bool okDebugCpu)
+void GdbServer_Run(int port, bool okDebugCpu, int maxFrames)
 {
 #ifdef _WIN32
     WSADATA wsaData;
@@ -853,6 +901,7 @@ void GdbServer_Run(int port, bool okDebugCpu)
     }
 
     g_okDebugCpu = okDebugCpu;
+    g_maxFrames = maxFrames;
 
     std::wcout << L"Listening on localhost:" << port << L" for "
                << (g_okDebugCpu ? L"CPU" : L"PPU") << L"; in gdb say" << std::endl;
@@ -873,6 +922,7 @@ void GdbServer_Run(int port, bool okDebugCpu)
     g_consoleOutput.clear();
     g_okProgramExited = false;
     CProcessor::SetEMTCallback(EmtObserver);
+    g_pBoard->SetTerminalCallback(TerminalObserver);
 
     for (;;)
     {
@@ -892,6 +942,7 @@ void GdbServer_Run(int port, bool okDebugCpu)
     }
 
     CProcessor::SetEMTCallback(nullptr);
+    g_pBoard->SetTerminalCallback(nullptr);
     CloseSocket(g_socket);
     g_socket = INVALID_SOCKET_VALUE;
     std::wcout << L"gdb disconnected." << std::endl;

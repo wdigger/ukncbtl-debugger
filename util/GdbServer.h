@@ -23,9 +23,16 @@
 
 // Serve one gdb connection on `port`. `okDebugCpu` picks the processor:
 // the two have separate address spaces and separate breakpoint lists,
-// and gdb has one of each. Returns when gdb disconnects, or immediately
-// if the port cannot be listened on.
-void GdbServer_Run(int port, bool okDebugCpu);
+// and gdb has one of each.
+//
+// `maxFrames` bounds a single continue: a program that never stops would
+// otherwise run for ever, which is right at a keyboard and wrong in a
+// test harness. Zero means no bound. Reaching it is reported to gdb as
+// SIGALRM, so a log says what happened.
+//
+// Returns when gdb disconnects, or immediately if the port cannot be
+// listened on.
+void GdbServer_Run(int port, bool okDebugCpu, int maxFrames);
 
 // Type an ASCII line on the machine's keyboard, pumping frames so the
 // machine consumes it -- "R T\r" and the like. Implemented by the console
