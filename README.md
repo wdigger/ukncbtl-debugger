@@ -205,6 +205,57 @@ need not be contiguous or in source order.
 `list` reads the source from where the compiler recorded it at build time,
 which is only where it still is if the tree has not moved.
 
+### gdb
+
+`gdbserver [PORT]` serves gdb's own remote protocol on `localhost:PORT`
+(default 2345), for whichever processor `p` is currently on. It blocks
+until gdb disconnects: while gdb is attached it owns the machine, and
+answering console commands at the same time would mean two debuggers
+stepping one processor.
+
+There is a gdb to talk to it -- `pdp11-uknc-rt11-gdb`, from this
+project's own port; gdb has no pdp11 target of its own.
+
+Boot the machine and get the program to where you want it first, then
+hand it over:
+
+```
+CPU:001226> b main
+CPU:001226> continue
+ Stopped at 001226 <main> g2.c:12
+CPU:001226> gdbserver
+Listening on localhost:2345 for CPU; in gdb say
+  target remote :2345
+```
+
+```
+$ pdp11-uknc-rt11-gdb prog.elf
+(gdb) target remote :2345
+main () at g2.c:12
+(gdb) break g2.c:8
+(gdb) continue
+Breakpoint 1, sum (n=10) at g2.c:8
+(gdb) print total
+$1 = 55
+(gdb) bt
+#0  sum (n=10) at g2.c:8
+#1  0x000002aa in main () at g2.c:13
+```
+
+Registers, memory, breakpoints, stepping, frames, arguments and locals
+all work; the last three come from the call frame information the
+compiler emits, so they need `-g`. Two things to know:
+
+- `continue` with nothing to stop it runs until gdb interrupts it
+  (Ctrl-C), the connection drops, or the process is killed. There is no
+  way back to the console prompt in the meantime.
+- A backtrace ends at `main` with "previous frame inner to this frame".
+  The startup code below it has no call frame information, so there is
+  nothing to unwind through.
+
+Hardware breakpoints and watchpoints are not offered; gdb is told so and
+falls back to its own.
+
 ### Status and tracing
 
 | Command | Description |
@@ -263,6 +314,7 @@ Letters are named by the Latin glyph on the key. Scancodes match UKNCBTL's own
 | `list`, `l`, `list FILE:LINE`, `list NAME` | Show source (needs an ELF built with `-g`) |
 | `files` | List the source files the line table names |
 | `ss`, `sstep`, `sn`, `snext` | Step by source line, into or over calls |
+| `gdbserver [PORT]` | Serve gdb on `localhost:PORT` (default 2345) for the current processor |
 | `diskN attach FILE`, `diskN a FILE` | Attach a floppy image to drive `N` (`1`-`4`) |
 | `diskN detach`, `diskN d` | Detach the floppy image from drive `N` |
 | `cartN attach FILE`, `cartN a FILE` | Attach a 24 KB ROM cartridge to slot `N` (`1`-`2`) |

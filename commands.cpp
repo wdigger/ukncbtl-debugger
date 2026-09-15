@@ -26,6 +26,7 @@
 #include "emubase/Emubase.h"
 #include "util/BitmapFile.h"
 #include "util/console.h"
+#include "util/GdbServer.h"
 #include "util/ElfFile.h"
 #include "util/Dwarf.h"
 #include "util/Symbols.h"
@@ -561,6 +562,8 @@ void CmdShowHelp(const ConsoleCommandParams& /*params*/)
         L"  list, l        Show source around the PC, or carry on from the last listing\n"
         L"  list FILE:LINE, list NAME  Show source around a line or a function\n"
         L"  files          List the source files the line table knows about\n"
+        L"  gdbserver [PORT]  Serve gdb on localhost:PORT (default 2345) for the current\n"
+        L"                 processor; in gdb: \"target remote :PORT\"\n"
         L"  diskN attach FILE, diskN a FILE  Attach floppy image FILE to drive N; N=1..4\n"
         L"  diskN detach, diskN d  Detach floppy image from drive N; N=1..4\n"
         L"  cartN attach FILE, cartN a FILE  Attach 24K ROM cartridge FILE to slot N; N=1..2\n"
@@ -1060,6 +1063,29 @@ void CmdLoadSymbols(const ConsoleCommandParams& params)
     }
     else
         std::wcout << L"FAILED to load symbols from " << params.paramFilename << std::endl;
+}
+
+// "gdbserver [PORT]" -- let gdb drive the machine over its own remote
+// protocol, for the processor the "p" command is currently on. Blocks
+// until gdb disconnects: while it is attached it owns the machine, and
+// answering console commands at the same time would mean two debuggers
+// stepping one processor.
+void CmdGdbServer(const ConsoleCommandParams& params)
+{
+    const int kDefaultPort = 2345;
+
+    int port = kDefaultPort;
+    if (!params.paramFilename.empty())
+    {
+        port = (int)wcstol(params.paramFilename.c_str(), nullptr, 10);
+        if (port <= 0 || port > 65535)
+        {
+            std::wcout << L" Not a port number: " << params.paramFilename << std::endl;
+            return;
+        }
+    }
+
+    GdbServer_Run(port, m_okCurrentProc);
 }
 
 // "symbols" / "sym" -- list the currently loaded symbol table.
@@ -2186,6 +2212,8 @@ const ConsoleCommandStruct ConsoleCommands[] =
     { L"memsave", ARGINFO_OPT_FILENAME, CmdSaveMemoryDump },        // memsave [FILE]
     { L"statesave", ARGINFO_FILENAME,   CmdStateSave },              // statesave FILENAME
     { L"stateload", ARGINFO_FILENAME,   CmdStateLoad },              // stateload FILENAME
+
+    { L"gdbserver", ARGINFO_OPT_FILENAME, CmdGdbServer },            // gdbserver [PORT]
 
     { L"list", ARGINFO_OPT_FILENAME, CmdListSource },                // list [FILE:LINE | NAME]
     { L"l",    ARGINFO_OPT_FILENAME, CmdListSource },                // l [FILE:LINE | NAME]

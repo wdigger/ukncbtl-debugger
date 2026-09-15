@@ -33,7 +33,8 @@ SRCS := \
 	util/console.cpp \
 	util/Symbols.cpp \
 	util/ElfFile.cpp \
-	util/Dwarf.cpp
+	util/Dwarf.cpp \
+	util/GdbServer.cpp
 
 INCLUDES := -I.
 

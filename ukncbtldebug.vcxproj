@@ -157,6 +157,7 @@
     <ClCompile Include="util\Symbols.cpp" />
     <ClCompile Include="util\ElfFile.cpp" />
     <ClCompile Include="util\Dwarf.cpp" />
+    <ClCompile Include="util\GdbServer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="emubase\Memory.h" />
@@ -174,6 +175,7 @@
     <ClInclude Include="util\Symbols.h" />
     <ClInclude Include="util\ElfFile.h" />
     <ClInclude Include="util\Dwarf.h" />
+    <ClInclude Include="util\GdbServer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -60,6 +60,9 @@
     <ClCompile Include="util\Dwarf.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="util\GdbServer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="emubase\Hard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -108,6 +111,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="util\Dwarf.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util\GdbServer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="emubase\Memory.h">
