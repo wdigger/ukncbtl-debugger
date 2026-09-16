@@ -28,11 +28,33 @@ SRCS := \
 	emubase/Memory.cpp \
 	emubase/Processor.cpp \
 	emubase/SoundAY.cpp \
-	util/GdbServer.cpp
+	util/GdbServer.cpp \
+	util/Screen.cpp
 
 INCLUDES := -I.
 
 WARNINGS := -Wall -Wextra -Wno-unused-parameter
+
+# --- SDL3, if there is any --------------------------------------------------
+#
+# Only --screen needs it (see util/Screen.cpp), and the way this is
+# usually run -- by uknc-run, or by an editor -- has no screen at all,
+# so a build without SDL3 is a build, not a failure: Screen.cpp keeps
+# its functions and they do nothing.
+#
+# The .pc file is found through Homebrew's prefix as well as whatever
+# pkg-config already looks at: a pkg-config that came from somewhere
+# else (MacPorts', for one) searches its own tree and not Homebrew's,
+# and then a perfectly installed SDL3 looks missing.
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+# On the command itself rather than exported: the make that comes with
+# macOS is 3.81, and an exported variable does not reach $(shell).
+PKG_CONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH):$(BREW_PREFIX)/lib/pkgconfig" pkg-config
+
+SDL3_LIBS := $(shell $(PKG_CONFIG) --libs sdl3 2>/dev/null)
+ifneq ($(SDL3_LIBS),)
+SDL3_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl3 2>/dev/null) -DHAVE_SDL3
+endif
 
 # --- Configuration-specific flags -------------------------------------------
 
@@ -60,20 +82,20 @@ DEBUG_OBJS   := $(patsubst %.cpp,$(DEBUG_DIR)/%.o,$(SRCS))
 # --- Link -------------------------------------------------------------------
 
 $(RELEASE_DIR)/$(TARGET): $(RELEASE_OBJS)
-	$(CXX) $(RELEASE_OBJS) -o $@
+	$(CXX) $(RELEASE_OBJS) $(SDL3_LIBS) -o $@
 
 $(DEBUG_DIR)/$(TARGET): $(DEBUG_OBJS)
-	$(CXX) $(DEBUG_OBJS) -o $@
+	$(CXX) $(DEBUG_OBJS) $(SDL3_LIBS) -o $@
 
 # --- Compile ------------------------------------------------------------
 
 $(RELEASE_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXSTD) $(WARNINGS) $(INCLUDES) $(RELEASE_FLAGS) -c $< -o $@
+	$(CXX) $(CXXSTD) $(WARNINGS) $(INCLUDES) $(SDL3_CFLAGS) $(RELEASE_FLAGS) -c $< -o $@
 
 $(DEBUG_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXSTD) $(WARNINGS) $(INCLUDES) $(DEBUG_FLAGS) -c $< -o $@
+	$(CXX) $(CXXSTD) $(WARNINGS) $(INCLUDES) $(SDL3_CFLAGS) $(DEBUG_FLAGS) -c $< -o $@
 
 # --- Convenience targets --------------------------------------------------
 

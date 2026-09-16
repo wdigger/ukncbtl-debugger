@@ -39,4 +39,10 @@ void Emulator_KeyEvent(uint8_t keyPressed, bool pressed);
 
 bool Emulator_AttachFloppyImage(int slot, LPCTSTR sFilePath);
 
+// The machine's screen as 32-bit pixels: UKNC_SCREEN_WIDTH by
+// UKNC_SCREEN_HEIGHT of them (see above), 0x00RRGGBB each, written into
+// a buffer the caller owns. `colors` is Emulator_GetPalette()'s table.
+const uint32_t* Emulator_GetPalette();
+void Emulator_PrepareScreenRGB32(void* pImageBits, const uint32_t* colors);
+
 //////////////////////////////////////////////////////////////////////

@@ -31,7 +31,8 @@ On Windows, open `ukncbtldebug.sln` in Visual Studio 2022.
 ## Running
 
 ```
-ukncbtldebug [--disk1 FILE ... --disk4 FILE] [--rom FILE] [--port N] [--ppu] [--frames N]
+ukncbtldebug [--disk1 FILE ... --disk4 FILE] [--rom FILE] [--port N] [--ppu]
+             [--boot] [--screen] [--frames N]
 ```
 
 | Option | Meaning |
@@ -39,12 +40,22 @@ ukncbtldebug [--disk1 FILE ... --disk4 FILE] [--rom FILE] [--port N] [--ppu] [--
 | `--diskN FILE` | Attach a floppy image to drive `N` (1–4) |
 | `--rom FILE` | The machine's firmware; the default is `uknc_rom.bin` in the current directory |
 | `--port N` | Serve gdb on `localhost:N` (default 2345) |
-| `--ppu` | Debug the peripheral processor rather than the central one |
+| `--ppu` | Start with the peripheral processor selected; both are served either way |
+| `--boot` | Bring the operating system up before listening, so that gdb's `load` has something to run under |
+| `--screen` | Show the machine's screen in a window, and run at the speed that implies |
 | `--frames N` | Give up on a program that has run this long, in frames of 1/50 second |
 
 The UKNC has two PDP-11-style processors, a central one (CPU) and a peripheral one (PPU), with
-separate address spaces and separate breakpoints. gdb has one of each, so a session debugs one
-or the other; `--ppu` chooses.
+separate address spaces, separate breakpoints and nothing shared between them. They are served
+as gdb's two processes -- `info inferiors` lists both, `inferior 2` switches to the peripheral
+one -- so each has a symbol table of its own, which is what lets a program loaded into the PPU
+be debugged with its own symbols. A gdb that does not ask for the multiprocess extension gets
+the same two as threads of one process instead.
+
+`--screen` needs SDL3 (`brew install sdl3`, `apt install libsdl3-dev`); the Makefile finds it
+with pkg-config, and a build without it is the same build minus that option. The window is
+resizable, and closing it stops the machine: that is the only way to say "enough" to a machine
+you are watching, and gdb, if it is connected, sees the connection end.
 
 `--frames` is for a harness that must not wait on a program that never ends — a program that
 runs past it is reported to gdb as terminated. At a keyboard there is Ctrl-C and no reason for
@@ -56,7 +67,7 @@ It serves one connection and exits when gdb disconnects.
 
 ```
 $ ukncbtldebug --disk1 rt11.dsk --port 2345
-Listening on localhost:2345 for CPU; in gdb say
+Listening on localhost:2345 for CPU first; in gdb say
   target remote :2345
 ```
 

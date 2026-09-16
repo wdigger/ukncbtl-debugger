@@ -20,6 +20,7 @@
 
 #include "ukncbtldebug.h"
 #include "Emulator.h"
+#include "util/Screen.h"
 #include "emubase/Emubase.h"
 #include "util/GdbServer.h"
 
@@ -34,6 +35,7 @@ struct Options
     int  frames = 0;
     bool okDebugCpu = true;
     bool okBoot = false;
+    bool okScreen = false;
     bool okHelp = false;
 };
 
@@ -49,6 +51,8 @@ void PrintUsage()
         << L"                   served either way, as gdb's processes 1 (CPU) and 2 (PPU)" << std::endl
         << L"  --boot           bring the operating system up before listening, so that" << std::endl
         << L"                   gdb's \"load\" has something to run under" << std::endl
+        << L"  --screen         show the machine's screen in a window, and run it at the" << std::endl
+        << L"                   speed that implies (needs SDL3; without it, no window)" << std::endl
         << L"  --frames N       give up on a program that has run this long," << std::endl
         << L"                   in frames of 1/50 second (default: no limit)" << std::endl
         << L"  --help           this" << std::endl
@@ -93,6 +97,11 @@ bool ParseCommandLine(std::vector<std::wstring>& args, Options* options)
         if (arg == L"--boot")
         {
             options->okBoot = true;
+            continue;
+        }
+        if (arg == L"--screen")
+        {
+            options->okScreen = true;
             continue;
         }
 
@@ -182,6 +191,12 @@ int Run(std::vector<std::wstring>& args)
         }
     }
 
+    // Before the boot, so that it is something to watch.  A window that
+    // will not open is not fatal: Screen_Open() says why and the
+    // machine runs on unwatched.
+    if (options.okScreen)
+        Screen_Open();
+
     if (options.okBoot)
     {
         // Long enough for this project's own firmware and disk, which
@@ -192,12 +207,24 @@ int Run(std::vector<std::wstring>& args)
 
         std::wcout << L"Booting..." << std::endl;
         Emulator_Reset();
-        for (int i = 0; i < kBootFrames; i++)
+        for (int i = 0; i < kBootFrames && !Screen_QuitRequested(); i++)
+        {
             Emulator_SystemFrame();
+            Screen_Frame();
+        }
+    }
+
+    // Closed during the boot: nothing to serve, then.
+    if (Screen_QuitRequested())
+    {
+        Screen_Close();
+        Emulator_Done();
+        return 0;
     }
 
     GdbServer_Run(options.port, options.okDebugCpu, options.frames);
 
+    Screen_Close();
     Emulator_Done();
     return 0;
 }

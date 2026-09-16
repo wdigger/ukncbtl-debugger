@@ -25,6 +25,7 @@ typedef int socket_t;
 #include "Emulator.h"
 #include "emubase/Emubase.h"
 #include "GdbServer.h"
+#include "Screen.h"
 
 //////////////////////////////////////////////////////////////////////
 
@@ -376,17 +377,43 @@ bool SendAll(const char* data, size_t length)
 
 // One byte, or -1 if the connection is gone. With `okBlock` false,
 // returns -2 when there is nothing waiting.
+// A select() that came back because a signal arrived, rather than
+// because anything happened -- which is not an error and not an answer,
+// only a reason to ask again.
+bool IsInterrupted()
+{
+#ifdef _WIN32
+    return false;
+#else
+    return errno == EINTR;
+#endif
+}
+
+// Waiting is done in steps of this, with a window open: it wants its
+// events answered every so often or the desktop decides the program has
+// hung -- and a wait here can be a long one, a breakpoint being somebody
+// reading their screen.  So a blocking read is a wait with a timeout,
+// and the timeout is where the window gets its turn.
+const int kIdleMicroseconds = 20 * 1000;
+
 int RecvByte(bool okBlock)
 {
-    if (!okBlock)
+    for (;;)
     {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(g_socket, &fds);
-        struct timeval tv = { 0, 0 };
+        struct timeval tv = { 0, okBlock ? kIdleMicroseconds : 0 };
         int ready = select((int)g_socket + 1, &fds, nullptr, nullptr, &tv);
-        if (ready <= 0)
+        if (ready > 0)
+            break;
+        if (ready < 0 && !IsInterrupted())
+            return -1;
+        if (!okBlock)
             return -2;
+        if (Screen_QuitRequested())
+            return -1;   // As if the connection had gone: the run is over
+        Screen_Idle();
     }
 
     unsigned char ch;
@@ -567,6 +594,8 @@ int RunUntilStop()
         frames++;
 
         bool okHitBreakpoint = !Emulator_SystemFrame();
+        Screen_Frame();
+        Screen_Pace();
         FlushConsoleOutput();
         if (okHitBreakpoint)
             break;
@@ -585,10 +614,17 @@ int RunUntilStop()
             {
                 size_t before = g_consoleOutput.size();
                 Emulator_SystemFrame();
+                Screen_Frame();
                 idle = (g_consoleOutput.size() == before) ? idle + 1 : 0;
                 FlushConsoleOutput();
             }
             signal = STOPPED_EXITED;
+            break;
+        }
+
+        if (Screen_QuitRequested())
+        {
+            signal = 2;   // Stopped, and the next read will end the session
             break;
         }
 
@@ -698,6 +734,7 @@ bool StartProgram(const std::string& name, std::string* error)
             okStarted = true;
             break;
         }
+        Screen_Frame();
     }
     Emulator_Stop();
 
@@ -1193,6 +1230,32 @@ void GdbServer_Run(int port, bool okDebugCpu, int maxFrames)
                << (IsCpu(g_selected) ? L"CPU" : L"PPU")
                << L" first; in gdb say" << std::endl;
     std::wcout << L"  target remote :" << port << std::endl;
+
+    // Waiting for gdb to turn up, in steps rather than in one blocking
+    // accept: with a window open, this is the longest the machine ever
+    // sits still, and a window whose events nobody answers is a window
+    // the desktop greys out and calls hung.
+    for (;;)
+    {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(listener, &fds);
+        struct timeval tv = { 0, kIdleMicroseconds };
+        int ready = select((int)listener + 1, &fds, nullptr, nullptr, &tv);
+        if (ready > 0)
+            break;
+        // A signal cuts the wait short without meaning anything by it --
+        // SDL takes SIGTERM as "quit", and answers it through the event
+        // queue like any other way of closing the window, so the flag
+        // below is what decides, not the interruption.
+        if ((ready < 0 && !IsInterrupted()) || Screen_QuitRequested())
+        {
+            CloseSocket(listener);
+            std::wcout << L" No connection." << std::endl;
+            return;
+        }
+        Screen_Idle();
+    }
 
     g_socket = accept(listener, nullptr, nullptr);
     CloseSocket(listener);
