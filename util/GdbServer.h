@@ -21,9 +21,15 @@
 
 //////////////////////////////////////////////////////////////////////
 
-// Serve one gdb connection on `port`. `okDebugCpu` picks the processor:
-// the two have separate address spaces and separate breakpoint lists,
-// and gdb has one of each.
+// Serve one gdb connection on `port`.
+//
+// Both processors are served: two processes to gdb, the central one
+// process 1 and the peripheral one process 2, each with its own
+// registers, its own address space and -- which is the point of
+// processes rather than threads -- its own symbols. A gdb that does not
+// ask for the multiprocess extension gets them as two threads instead,
+// numbered the same. `okDebugCpu` only says which of them is selected
+// before gdb has said anything.
 //
 // `maxFrames` bounds a single continue: a program that never stops would
 // otherwise run for ever, which is right at a keyboard and wrong in a

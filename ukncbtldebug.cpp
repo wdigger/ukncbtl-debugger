@@ -45,7 +45,8 @@ void PrintUsage()
         << L"  --disk1 FILE ... --disk4 FILE  attach a floppy image to a drive" << std::endl
         << L"  --rom FILE       the machine's firmware (default: uknc_rom.bin here)" << std::endl
         << L"  --port N         serve gdb on localhost:N (default: 2345)" << std::endl
-        << L"  --ppu            debug the peripheral processor, not the central one" << std::endl
+        << L"  --ppu            start with the peripheral processor selected; both are" << std::endl
+        << L"                   served either way, as gdb's processes 1 (CPU) and 2 (PPU)" << std::endl
         << L"  --boot           bring the operating system up before listening, so that" << std::endl
         << L"                   gdb's \"load\" has something to run under" << std::endl
         << L"  --frames N       give up on a program that has run this long," << std::endl

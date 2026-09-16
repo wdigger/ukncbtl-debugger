@@ -42,12 +42,12 @@ namespace {
 //                  into memory itself (which it would otherwise do, and
 //                  which would be wrong for anything in ROM)
 //   D, k           detach, kill
-//   H, qC, qfThreadInfo, qsThreadInfo
-//                  threads.  There is one processor and no threads, but
-//                  gdb asks, and an answer it understands is shorter
-//                  than the fallbacks it tries when it gets none.
+//   H, qC, qfThreadInfo, qsThreadInfo, qThreadExtraInfo, T
+//                  which of the two processors a packet is about, what
+//                  to call them, and whether they are still there
 //   qSupported, qAttached
-//                  the opening negotiation
+//                  the opening negotiation, including whether the two
+//                  are told apart by process id -- see below
 //   !, vRun, R     extended mode: starting and restarting a program.
 //                  RT-11 loads programs, not gdb, so "start" here means
 //                  what a person would do -- reset, let the system come
@@ -65,10 +65,41 @@ namespace {
 
 socket_t g_socket = INVALID_SOCKET_VALUE;
 
-// Which processor this session debugs, fixed when the server starts:
-// the two have separate address spaces and separate breakpoint lists,
-// and gdb has one of each.
-bool g_okDebugCpu = true;
+// The machine's two processors are two processes to gdb: the central
+// one is process 1, the peripheral one process 2, each with a single
+// thread of its own -- "p1.1" and "p2.1" as the protocol writes them.
+//
+// Processes rather than threads, which is what these were at first,
+// because threads share one address space and one set of symbols.  Two
+// processors that share neither do not fit that: gdb would label an
+// address in one with whatever name the other had near it, and code
+// loaded into the peripheral processor could have no symbols of its own
+// at all, since the one executable gdb reads is the central one's.
+// Processes get a symbol table each, which is what these two want.
+//
+// gdb has to ask for that, though -- the multiprocess extension, agreed
+// in qSupported -- and a client that does not ask gets the older
+// answer: the same two, numbered the same, as threads of one process.
+// Only how an id is written differs; everything else about the session
+// is the same either way.
+//
+// Stepping runs the board, so both advance together whichever one is
+// selected; what the selection decides is whose registers and whose
+// memory a packet is about.
+const int PROC_CPU = 1;
+const int PROC_PPU = 2;
+
+// Set by the H packet, and by --ppu before gdb has said anything.
+int g_selected = PROC_CPU;
+
+// Whether gdb asked for the multiprocess extension. It decides how an
+// id is written and read, and nothing else.
+bool g_okMultiprocess = false;
+
+bool IsCpu(int id)
+{
+    return id != PROC_PPU;
+}
 
 // Set by the "!" packet. gdb sends it when connected with "target
 // extended-remote", and will not offer "run" without it.
@@ -105,18 +136,32 @@ void CALLBACK TerminalObserver(uint8_t byte)
 
 void EmtObserver(CProcessor* pProc, uint8_t code)
 {
-    // Only the processor this session is debugging; the other one's
-    // traps are its own business.
-    if ((pProc == g_pBoard->GetCPU()) != g_okDebugCpu)
+    // The central processor only: RT-11 runs there, and so does every
+    // program that has a console to write to or an exit to make.
+    if (pProc != g_pBoard->GetCPU())
         return;
 
     if (code == EMT_EXIT)
         g_okProgramExited = true;
 }
 
+// Zero means "whichever gdb has selected": it is what an unqualified
+// vCont action, and every packet that names neither of the two, is
+// about.
+int SelectedOr(int id)
+{
+    return id == 0 ? g_selected : id;
+}
+
+CProcessor* ProcFor(int id)
+{
+    return IsCpu(SelectedOr(id))
+        ? g_pBoard->GetCPU() : g_pBoard->GetPPU();
+}
+
 CProcessor* Proc()
 {
-    return g_okDebugCpu ? g_pBoard->GetCPU() : g_pBoard->GetPPU();
+    return ProcFor(0);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -249,6 +294,68 @@ bool ParseNumber(const std::string& text, size_t* pos, uint32_t* value)
         return false;
     *value = result;
     return true;
+}
+
+// Step over `what` if that is what comes next.
+bool ExpectText(const std::string& text, size_t* pos, const char* what)
+{
+    size_t length = strlen(what);
+    if (*pos + length > text.size() || text.compare(*pos, length, what) != 0)
+        return false;
+    *pos += length;
+    return true;
+}
+
+// One of the two, written the way the protocol asks for it: "p1.1" once
+// gdb has asked for the multiprocess extension, plain "1" otherwise.
+std::string FormatId(int id)
+{
+    char buffer[16];
+    if (g_okMultiprocess)
+        snprintf(buffer, sizeof (buffer), "p%x.1", id);
+    else
+        snprintf(buffer, sizeof (buffer), "%x", id);
+    return buffer;
+}
+
+// And back: "p2.1", "p2.-1", "p-1.-1", "2", "-1", "0" -- everything gdb
+// writes where an id goes.  The process is the part that matters, each
+// of these two having exactly one thread, so the thread is parsed only
+// to step over it.  "All" and "any" both answer zero, which every
+// caller reads as "whichever is selected".
+int ParseId(const std::string& text, size_t* pos)
+{
+    uint32_t value = 0;
+    int id = 0;
+
+    if (*pos < text.size() && text[*pos] == 'p')
+    {
+        (*pos)++;
+        if (!ExpectText(text, pos, "-1") && ParseNumber(text, pos, &value))
+            id = (int)value;
+        if (ExpectText(text, pos, "."))
+        {
+            if (!ExpectText(text, pos, "-1"))
+                ParseNumber(text, pos, &value);
+        }
+        return id;
+    }
+
+    if (ExpectText(text, pos, "-1"))
+        return 0;
+    if (!ParseNumber(text, pos, &value))
+        return 0;
+    return (int)value;
+}
+
+// The one a vCont action is for: the ":id" written after it.  Nothing
+// there is "every thread", which answers zero like the rest.
+int ParseActionId(const std::string& text, size_t* pos)
+{
+    if (*pos >= text.size() || text[*pos] != ':')
+        return 0;
+    (*pos)++;
+    return ParseId(text, pos);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -396,14 +503,16 @@ void WriteRegister(int regnum, uint16_t value)
 
 bool AddBreakpoint(uint16_t address)
 {
-    return g_okDebugCpu ? Emulator_AddCPUBreakpoint(address)
-                        : Emulator_AddPPUBreakpoint(address);
+    return IsCpu(g_selected)
+        ? Emulator_AddCPUBreakpoint(address)
+        : Emulator_AddPPUBreakpoint(address);
 }
 
 bool RemoveBreakpoint(uint16_t address)
 {
-    return g_okDebugCpu ? Emulator_RemoveCPUBreakpoint(address)
-                        : Emulator_RemovePPUBreakpoint(address);
+    return IsCpu(g_selected)
+        ? Emulator_RemoveCPUBreakpoint(address)
+        : Emulator_RemovePPUBreakpoint(address);
 }
 
 // Run until a breakpoint is hit or gdb interrupts. Returns the signal to
@@ -434,8 +543,12 @@ int RunUntilStop()
     // that breakpoint again before anything had run, and gdb would
     // report a stop where it had just been told to go. Step off it
     // first, which is what every stub has to do here.
-    uint16_t pc = Proc()->GetReg(7);
-    if (Emulator_IsBreakpoint(g_okDebugCpu, pc))
+    //
+    // Either processor, not just the selected one: they run together,
+    // so a breakpoint the other is sitting on would stop the resume
+    // just as immediately. One step moves both (see DebugTicks).
+    if (Emulator_IsBreakpoint(true, g_pBoard->GetCPU()->GetPC())
+        || Emulator_IsBreakpoint(false, g_pBoard->GetPPU()->GetPC()))
         g_pBoard->DebugTicks();
 
     Emulator_Start();
@@ -503,16 +616,18 @@ int RunUntilStop()
 // Stops early on a breakpoint, on gdb interrupting, and on a cap, since
 // stepping does not advance the frame timer and code waiting on it would
 // never leave the range.
-int RangeStep(uint16_t low, uint16_t high)
+int RangeStep(uint16_t low, uint16_t high, int id)
 {
     const long kMaxInstructions = 2000000;
+    CProcessor* pProc = ProcFor(id);
+    bool okCpu = IsCpu(SelectedOr(id));
 
     for (long executed = 0; executed < kMaxInstructions; executed++)
     {
         g_pBoard->DebugTicks();
 
-        uint16_t pc = Proc()->GetPC();
-        if (Emulator_IsBreakpoint(g_okDebugCpu, pc))
+        uint16_t pc = pProc->GetPC();
+        if (Emulator_IsBreakpoint(okCpu, pc))
             break;
         if (pc < low || pc >= high)
             break;
@@ -599,6 +714,18 @@ bool StartProgram(const std::string& name, std::string* error)
     return true;
 }
 
+// Which processor stopped: the one sitting on a breakpoint of its own.
+// With nothing to go by -- a step, an interrupt -- the answer is
+// whichever one is selected.
+int StoppedProcessor()
+{
+    if (Emulator_IsBreakpoint(true, g_pBoard->GetCPU()->GetPC()))
+        return PROC_CPU;
+    if (Emulator_IsBreakpoint(false, g_pBoard->GetPPU()->GetPC()))
+        return PROC_PPU;
+    return g_selected;
+}
+
 // The stop reply for one of those.
 //
 // A timeout is reported as "terminated by SIGALRM" rather than "stopped
@@ -606,15 +733,33 @@ bool StartProgram(const std::string& name, std::string* error)
 // against a program that is not going to stop means resuming for ever.
 // Terminated leaves nothing to resume, which is what giving up means.
 // RT-11's .EXIT carries no status, so a program that ended reports zero.
-std::string StopReply(int signal)
+//
+// A plain stop names which of the two it is, so that gdb knows what it
+// is looking at; and since the answer is a stop in one of them while
+// the other is simply also there, the selection follows it. Zero means
+// "work it out"; anything else is the one the resume was for -- see the
+// vCont packet.
+std::string StopReply(int signal, int id = 0)
 {
-    if (signal == STOPPED_EXITED)
-        return "W00";
-    if (signal == STOPPED_TIMEOUT)
-        return "X0e";
+    // The program that ends is the central processor's -- the
+    // peripheral one is a process of its own and carries on -- so with
+    // the multiprocess extension the end has to say whose it was.
+    const std::string whose = g_okMultiprocess ? ";process:1" : "";
 
-    char buffer[8];
-    snprintf(buffer, sizeof (buffer), "S%02x", signal);
+    if (signal == STOPPED_EXITED)
+        return "W00" + whose;
+    if (signal == STOPPED_TIMEOUT)
+        return "X0e" + whose;
+
+    // A resume that named one of them is answered for that one, whatever
+    // the other happens to be sitting on: gdb asked this one to step,
+    // and an answer about the other is not an answer it knows what to do
+    // with.
+    g_selected = (id == 0) ? StoppedProcessor() : id;
+
+    char buffer[32];
+    snprintf(buffer, sizeof (buffer), "T%02xthread:%s;",
+             signal, FormatId(g_selected).c_str());
     return buffer;
 }
 
@@ -642,6 +787,7 @@ bool HandlePacket(const std::string& packet)
             if (!StartProgram(g_programName, &error))
                 std::wcout << L" gdb: " << std::wstring(error.begin(), error.end())
                            << std::endl;
+            g_selected = PROC_CPU;   // As for vRun above
             return true;
         }
 
@@ -649,7 +795,7 @@ bool HandlePacket(const std::string& packet)
         // Whatever put us here, gdb wants a stop reason; the machine is
         // sitting at a console prompt, which is a trap as far as it is
         // concerned.
-        return SendPacket("S05");
+        return SendPacket(StopReply(5));
 
     case 'g':
         ReadAllRegisters(reply);
@@ -785,7 +931,7 @@ bool HandlePacket(const std::string& packet)
                     Proc()->SetReg(7, (uint16_t)address);
             }
             g_pBoard->DebugTicks();
-            return SendPacket("S05");
+            return SendPacket(StopReply(5));
         }
 
     case 'Z':
@@ -814,31 +960,69 @@ bool HandlePacket(const std::string& packet)
 
             if (packet.compare(0, 6, "vCont;") == 0)
             {
-                // Only the first action is honoured: there is one thread,
-                // so the rest could only repeat it.
+                // The whole list is read, and which of the two each
+                // action names with it. gdb steps one over a breakpoint
+                // while the rest run -- "vCont;s:p1.1;c" -- and
+                // answering that step for the other is not a mistake gdb
+                // recovers from: it aborts with an internal error.
+                //
+                // Only one action can be carried out, since the board
+                // runs as a whole: a step advances both processors (see
+                // DebugTicks) and a resume runs both. So the first
+                // action that is not a plain continue decides, and the
+                // one it names is whose stop this is reported as.
                 size_t pos = 6;
-                char action = packet[pos++];
+                char what = 0;
+                int id = 0;
+                uint32_t low = 0, high = 0;
 
-                if (action == 'r')
+                while (pos < packet.size())
                 {
-                    uint32_t low, high;
-                    if (!ParseNumber(packet, &pos, &low)
-                        || !Expect(packet, &pos, ',')
-                        || !ParseNumber(packet, &pos, &high))
+                    char action = packet[pos++];
+                    uint32_t first = 0, second = 0;
+
+                    if (action == 'r')
+                    {
+                        if (!ParseNumber(packet, &pos, &first)
+                            || !Expect(packet, &pos, ',')
+                            || !ParseNumber(packet, &pos, &second))
+                            return SendPacket("E01");
+                    }
+                    else if (action == 'C' || action == 'S')
+                    {
+                        // The signal to resume with, which this machine
+                        // has no way to deliver -- only the resume
+                        // itself is carried out.
+                        if (!ParseNumber(packet, &pos, &first))
+                            return SendPacket("E01");
+                    }
+                    else if (action != 'c' && action != 's' && action != 't')
                         return SendPacket("E01");
-                    return SendPacket(StopReply(RangeStep((uint16_t)low,
-                                                          (uint16_t)high)));
+
+                    int actionId = ParseActionId(packet, &pos);
+                    if (what == 0 && action != 'c' && action != 'C')
+                    {
+                        what = action;
+                        id = actionId;
+                        low = first;
+                        high = second;
+                    }
+                    if (pos < packet.size() && packet[pos] == ';')
+                        pos++;
                 }
-                if (action == 's' || action == 'S')
+
+                if (what == 'r')
+                    return SendPacket(StopReply(RangeStep((uint16_t)low,
+                                                          (uint16_t)high, id),
+                                                id));
+                if (what == 's' || what == 'S')
                 {
                     g_pBoard->DebugTicks();
-                    return SendPacket("S05");
+                    return SendPacket(StopReply(5, id));
                 }
-                if (action == 'c' || action == 'C')
-                    return SendPacket(StopReply(RunUntilStop()));
-                if (action == 't')
-                    return SendPacket("S02");
-                return SendPacket("E01");
+                if (what == 't')
+                    return SendPacket(StopReply(2, id));
+                return SendPacket(StopReply(RunUntilStop()));
             }
 
             if (packet.compare(0, 5, "vRun;") == 0)
@@ -866,7 +1050,10 @@ bool HandlePacket(const std::string& packet)
                                << std::endl;
                     return SendPacket("E01");
                 }
-                return SendPacket("S05");
+                // Whatever was selected before, what has just started is
+                // the central processor's, and that is where the stop is.
+                g_selected = PROC_CPU;
+                return SendPacket(StopReply(5));
             }
 
             if (packet.compare(0, 6, "vKill;") == 0)
@@ -875,28 +1062,77 @@ bool HandlePacket(const std::string& packet)
             return SendPacket("");
         }
 
+    case 'T':
+        {
+            // "Is thread N still alive?"  Both always are: they are the
+            // machine's two processors, and the machine is switched on.
+            // Without this answer gdb decides they have terminated and
+            // will not switch to either.
+            size_t pos = 1;
+            int id = ParseId(packet, &pos);
+            return SendPacket(
+                (id == PROC_CPU || id == PROC_PPU) ? "OK" : "E01");
+        }
+
     case 'H':
-        // "Use thread N for the following operations." There is one.
-        return SendPacket("OK");
+        {
+            // "Use thread N for what follows."  The letter after H says
+            // what for -- g for reading and writing, c for running --
+            // and only the first changes anything here, since running
+            // runs the whole board.
+            if (packet.size() < 2)
+                return SendPacket("E01");
+            size_t pos = 2;
+            int id = ParseId(packet, &pos);
+            if (packet[1] == 'g' && id != 0)   // Zero is "any", which leaves it alone
+            {
+                if (id != PROC_CPU && id != PROC_PPU)
+                    return SendPacket("E01");
+                g_selected = id;
+            }
+            return SendPacket("OK");
+        }
 
     case 'D':
+        // "D;pid" detaches one process: the other is still there and so
+        // is the session. A bare "D" is the whole thing.
         SendPacket("OK");
-        return false;
+        return packet.size() > 1 && packet[1] == ';';
 
     case 'k':
         return false;
 
     case 'q':
         if (packet.compare(0, 10, "qSupported") == 0)
-            return SendPacket("PacketSize=1000;vContSupported+;swbreak+");
-        if (packet == "qAttached")
+        {
+            // The two processors are told apart by process id only if
+            // gdb asks for that here: a stub must not answer in a form
+            // the other side did not agree to.
+            g_okMultiprocess = packet.find("multiprocess+") != std::string::npos;
+            return SendPacket(g_okMultiprocess
+                ? "PacketSize=1000;vContSupported+;swbreak+;multiprocess+"
+                : "PacketSize=1000;vContSupported+;swbreak+");
+        }
+        if (packet.compare(0, 10, "qAttached") == 0)
             return SendPacket("1");   // Already running; do not kill on detach
         if (packet == "qC")
-            return SendPacket("QC1");
+            return SendPacket("QC" + FormatId(g_selected));
         if (packet == "qfThreadInfo")
-            return SendPacket("m1");
+            return SendPacket("m" + FormatId(PROC_CPU) + "," + FormatId(PROC_PPU));
         if (packet == "qsThreadInfo")
             return SendPacket("l");
+        if (packet.compare(0, 17, "qThreadExtraInfo,") == 0)
+        {
+            // What to call them in a thread list.  Hex, like every
+            // string the protocol carries.
+            size_t pos = 17;
+            const char* name = (ParseId(packet, &pos) == PROC_PPU)
+                ? "PPU (peripheral processor)"
+                : "CPU (central processor)";
+            for (const char* p = name; *p != '\0'; p++)
+                AppendByte(reply, (uint8_t)*p);
+            return SendPacket(reply);
+        }
         return SendPacket("");
 
     default:
@@ -950,11 +1186,12 @@ void GdbServer_Run(int port, bool okDebugCpu, int maxFrames)
         return;
     }
 
-    g_okDebugCpu = okDebugCpu;
+    g_selected = okDebugCpu ? PROC_CPU : PROC_PPU;
     g_maxFrames = maxFrames;
 
     std::wcout << L"Listening on localhost:" << port << L" for "
-               << (g_okDebugCpu ? L"CPU" : L"PPU") << L"; in gdb say" << std::endl;
+               << (IsCpu(g_selected) ? L"CPU" : L"PPU")
+               << L" first; in gdb say" << std::endl;
     std::wcout << L"  target remote :" << port << std::endl;
 
     g_socket = accept(listener, nullptr, nullptr);
@@ -984,7 +1221,7 @@ void GdbServer_Run(int port, bool okDebugCpu, int maxFrames)
         {
             // An interrupt outside a run: nothing was going on, so just
             // say where we are.
-            SendPacket("S02");
+            SendPacket(StopReply(2));
             continue;
         }
         if (!HandlePacket(packet))
