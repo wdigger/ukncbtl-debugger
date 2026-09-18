@@ -14,7 +14,19 @@
 
 CXX      := g++
 CXXSTD   := -std=c++17
-TARGET   := ukncbtldebug
+
+# Windows names its executables .exe, and the compiler writes that name
+# whatever it was asked for -- so the target has to be called that too,
+# or make rebuilds a file it never finds.  Winsock goes with it: the
+# sockets in util/GdbServer.cpp are Winsock's there, and mingw does not
+# link that library of its own accord the way the Visual Studio project
+# does.
+ifeq ($(OS),Windows_NT)
+EXE          := .exe
+PLATFORM_LIBS := -lws2_32
+endif
+
+TARGET   := ukncbtldebug$(EXE)
 
 SRCS := \
 	ukncbtldebug.cpp \
@@ -82,10 +94,10 @@ DEBUG_OBJS   := $(patsubst %.cpp,$(DEBUG_DIR)/%.o,$(SRCS))
 # --- Link -------------------------------------------------------------------
 
 $(RELEASE_DIR)/$(TARGET): $(RELEASE_OBJS)
-	$(CXX) $(RELEASE_OBJS) $(SDL3_LIBS) -o $@
+	$(CXX) $(RELEASE_OBJS) $(SDL3_LIBS) $(PLATFORM_LIBS) -o $@
 
 $(DEBUG_DIR)/$(TARGET): $(DEBUG_OBJS)
-	$(CXX) $(DEBUG_OBJS) $(SDL3_LIBS) -o $@
+	$(CXX) $(DEBUG_OBJS) $(SDL3_LIBS) $(PLATFORM_LIBS) -o $@
 
 # --- Compile ------------------------------------------------------------
 
