@@ -94,11 +94,11 @@ $1 = 55
 The subset of the protocol a stub has to: registers (`g`, `G`, `p`, `P`), memory (`m`, `M`,
 and `X` for binary writes), continue and step (`c`, `s`, `vCont` including range stepping),
 software breakpoints (`Z0`, `z0`), the opening negotiation and extended mode (`qSupported`,
-`qAttached`, `!`, `vRun`, `R`). Anything else gets the empty reply that means "not
-implemented", which is always a valid answer — so gdb manages hardware breakpoints and
-watchpoints itself rather than being told a lie.
+`qAttached`, `!`, `vRun`, `R`), and `qRcmd` for the things below. Anything else gets the empty
+reply that means "not implemented", which is always a valid answer — so gdb manages hardware
+breakpoints and watchpoints itself rather than being told a lie.
 
-Two things about it are particular to this machine.
+Three things about it are particular to this machine.
 
 **Starting a program.** RT-11 loads programs, not gdb, so `run` means what a person means by
 it: reset, wait for the system to come up, type `R NAME` at the monitor, stop at the entry
@@ -118,6 +118,34 @@ character hundreds of times.
 `.EXIT` is how an RT-11 program ends, and the server watches for it — that is what tells gdb
 the program finished, rather than waiting for a stop that was never coming. It happens while
 the last of what was written is still queued, so the run carries on until that trickle stops.
+
+**Things done to a machine rather than to a program.** A machine is switched off and on, typed
+at, looked at, and no debugger has a packet for any of that. `monitor` is gdb's way of passing
+a line through to the other end, and this is what the other end does with it:
+
+| Command | |
+|---|---|
+| `monitor reset` | switch the machine off and on |
+| `monitor keys TEXT` | type that on its keyboard, and Enter |
+| `monitor frames N` | let it run N frames of 1/50 s |
+| `monitor disk N FILE` | put a floppy image in drive N (1–4) |
+| `monitor screen on`, `off` | show its screen in a window, or stop |
+| `monitor screenshot FILE` | write the screen to FILE, as a BMP |
+
+`frames` is the odd one: between stops the machine is not running, so nothing typed at it has
+happened yet, and this is how time passes when there is no program to continue. A whole session
+without gdb starting anything looks like
+
+```
+(gdb) monitor keys R DEMO
+(gdb) monitor frames 300
+(gdb) monitor screenshot /tmp/demo.bmp
+```
+
+and the program's own output comes back in the terminal as it goes. The screenshot is drawn
+from the machine's memory rather than from anything on screen, so it works with no window open
+and in a build with no SDL3 — which is the point: a program that draws is otherwise hard to
+check from a script.
 
 Registers, memory, breakpoints, stepping, frames, arguments and locals all work; the last three
 come from the call frame information the compiler emits, so they need `-g`. A backtrace ends at

@@ -1,10 +1,99 @@
 // Screen.cpp -- the machine's screen, in a window (see Screen.h)
 
 #include "stdafx.h"
+#include <cstdio>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #include "Emulator.h"
 #include "Screen.h"
+
+//////////////////////////////////////////////////////////////////////
+// The picture as a file
+//
+// Nothing here is SDL's: the machine's screen is drawn from its own
+// memory (Emulator_PrepareScreenRGB32) and written out as the simplest
+// thing every viewer reads.  A build without SDL3 has this much.
+
+namespace {
+
+void AppendWord(std::string& out, uint16_t value)
+{
+    out.push_back((char)(value & 0xff));
+    out.push_back((char)(value >> 8));
+}
+
+void AppendLong(std::string& out, uint32_t value)
+{
+    AppendWord(out, (uint16_t)(value & 0xffff));
+    AppendWord(out, (uint16_t)(value >> 16));
+}
+
+}  // namespace
+
+bool Screen_Save(const char* path)
+{
+    const int width = UKNC_SCREEN_WIDTH;
+    const int height = UKNC_SCREEN_HEIGHT;
+    // Three bytes a pixel, and a BMP row is padded to four -- 1920 is a
+    // multiple of four already, but the padding is written rather than
+    // assumed away, since the screen's width is not this file's to fix.
+    const int stride = ((width * 3) + 3) & ~3;
+
+    std::vector<uint32_t> pixels((size_t)width * height);
+    Emulator_PrepareScreenRGB32(pixels.data(), Emulator_GetPalette());
+
+    std::string header;
+    const uint32_t pixelsOffset = 14 + 40;
+    const uint32_t fileSize = pixelsOffset + (uint32_t)stride * height;
+
+    header.push_back('B');
+    header.push_back('M');
+    AppendLong(header, fileSize);
+    AppendLong(header, 0);
+    AppendLong(header, pixelsOffset);
+
+    AppendLong(header, 40);              // The header that follows
+    AppendLong(header, (uint32_t)width);
+    AppendLong(header, (uint32_t)height);
+    AppendWord(header, 1);               // Planes
+    AppendWord(header, 24);              // Bits per pixel
+    AppendLong(header, 0);               // Not compressed
+    AppendLong(header, (uint32_t)stride * height);
+    AppendLong(header, 2835);            // Pixels per metre, both ways:
+    AppendLong(header, 2835);            // 72 dpi, which nothing reads
+    AppendLong(header, 0);               // Colours used
+    AppendLong(header, 0);               // Colours that matter
+
+    FILE* file = fopen(path, "wb");
+    if (file == nullptr)
+        return false;
+
+    bool okWritten = fwrite(header.data(), header.size(), 1, file) == 1;
+
+    // Bottom row first, and blue before red: a BMP is written the way a
+    // screen is scanned out, upside down.
+    std::vector<uint8_t> row((size_t)stride, 0);
+    for (int y = height - 1; okWritten && y >= 0; y--)
+    {
+        const uint32_t* line = pixels.data() + (size_t)y * width;
+        for (int x = 0; x < width; x++)
+        {
+            row[(size_t)x * 3 + 0] = (uint8_t)(line[x] & 0xff);
+            row[(size_t)x * 3 + 1] = (uint8_t)((line[x] >> 8) & 0xff);
+            row[(size_t)x * 3 + 2] = (uint8_t)((line[x] >> 16) & 0xff);
+        }
+        okWritten = fwrite(row.data(), row.size(), 1, file) == 1;
+    }
+
+    if (fclose(file) != 0)
+        okWritten = false;
+    return okWritten;
+}
+
+//////////////////////////////////////////////////////////////////////
+// The picture in a window
 
 #ifdef HAVE_SDL3
 

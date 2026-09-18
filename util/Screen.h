@@ -43,6 +43,14 @@ void Screen_Pace();
 // window from going grey while gdb thinks.
 void Screen_Idle();
 
+// The picture as a file: 24-bit BMP, the machine's own 640 x 288.
+// Drawn from its memory rather than from anything on screen, so this
+// works with no window open and in a build with no SDL3 at all --
+// which is where it is most use, a program that draws being hard to
+// check from a script otherwise.  False, having said why, if the file
+// cannot be written.
+bool Screen_Save(const char* path);
+
 bool Screen_IsOpen();
 
 // Whether the window has been closed from the desktop -- the red button,

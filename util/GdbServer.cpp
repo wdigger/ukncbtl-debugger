@@ -55,6 +55,8 @@ namespace {
 //                  up, type "R NAME" -- stopping at the entry point.
 //   vCont, vCont?  resume, with range stepping (see RangeStep below)
 //   X              binary memory write, which is what "load" uses
+//   qRcmd          "monitor": the things done to a machine rather than
+//                  to a program -- see MonitorCommand below
 //
 // and one packet sent the other way, unasked: O, which carries whatever
 // the program writes to the console -- taken off the channel to the
@@ -751,6 +753,168 @@ bool StartProgram(const std::string& name, std::string* error)
     return true;
 }
 
+//////////////////////////////////////////////////////////////////////
+// "monitor", which is gdb's word for "your business, not mine"
+//
+// A machine has things done to it that no debugger has a packet for:
+// it is switched off and on, typed at, looked at.  gdb passes whatever
+// follows "monitor" through as qRcmd and prints back whatever comes of
+// it, which is exactly the shape of that.
+
+// One line of it, back to gdb: an O packet, the same one the program's
+// own output goes through.
+void MonitorSay(const std::string& text)
+{
+    std::string hex;
+    for (char ch : text)
+        AppendByte(hex, (uint8_t)ch);
+    AppendByte(hex, (uint8_t)'\n');
+    SendPacket("O" + hex);
+}
+
+// The word up to the first space, and what is left after it.
+void SplitCommand(const std::string& line, std::string* word,
+                  std::string* rest)
+{
+    size_t start = line.find_first_not_of(' ');
+    if (start == std::string::npos)
+    {
+        word->clear();
+        rest->clear();
+        return;
+    }
+    size_t space = line.find(' ', start);
+    if (space == std::string::npos)
+    {
+        *word = line.substr(start);
+        rest->clear();
+        return;
+    }
+    *word = line.substr(start, space - start);
+    size_t restStart = line.find_first_not_of(' ', space);
+    *rest = (restStart == std::string::npos) ? "" : line.substr(restStart);
+}
+
+void MonitorHelp()
+{
+    MonitorSay("monitor reset            switch the machine off and on");
+    MonitorSay("monitor keys TEXT        type that on its keyboard, and Enter");
+    MonitorSay("monitor frames N         let the machine run N frames (1/50 s each)");
+    MonitorSay("monitor disk N FILE      put a floppy image in drive N (1-4)");
+    MonitorSay("monitor screen on|off    show the machine's screen, or stop");
+    MonitorSay("monitor screenshot FILE  write the screen to FILE, as a BMP");
+}
+
+// Carries out one command.  Everything it has to say goes back through
+// MonitorSay, including what went wrong: gdb turns an error reply into
+// "Protocol error with Rcmd", which tells nobody anything.
+void MonitorCommand(const std::string& line)
+{
+    std::string word, rest;
+    SplitCommand(line, &word, &rest);
+
+    if (word.empty() || word == "help")
+    {
+        MonitorHelp();
+        return;
+    }
+
+    if (word == "reset")
+    {
+        Emulator_Reset();
+        MonitorSay("the machine has been reset");
+        return;
+    }
+
+    if (word == "keys")
+    {
+        // Typed as at the keyboard, Enter and all: what this is for is
+        // the machine's own command line, which is waiting for one.
+        TypeLine(rest + "\r");
+        MonitorSay("typed: " + rest);
+        return;
+    }
+
+    if (word == "frames")
+    {
+        // Typing at the machine, or anything else done to it from here,
+        // takes effect while it runs -- and between stops it is not
+        // running.  This is how time passes without a program to
+        // continue.
+        int frames = atoi(rest.c_str());
+        if (frames <= 0)
+        {
+            MonitorSay("usage: monitor frames N");
+            return;
+        }
+        Emulator_Start();
+        for (int i = 0; i < frames && g_okEmulatorRunning; i++)
+        {
+            Emulator_SystemFrame();
+            Screen_Frame();
+        }
+        Emulator_Stop();
+        FlushConsoleOutput();
+        MonitorSay("ran " + std::to_string(frames) + " frames");
+        return;
+    }
+
+    if (word == "disk")
+    {
+        std::string slotText, path;
+        SplitCommand(rest, &slotText, &path);
+        int slot = atoi(slotText.c_str());
+        if (slot < 1 || slot > 4 || path.empty())
+        {
+            MonitorSay("usage: monitor disk N FILE, with N from 1 to 4");
+            return;
+        }
+        if (!Emulator_AttachFloppyImage(slot - 1, path.c_str()))
+            MonitorSay("cannot attach " + path);
+        else
+            MonitorSay("drive " + slotText + ": " + path);
+        return;
+    }
+
+    if (word == "screen")
+    {
+        if (rest == "off")
+        {
+            Screen_Close();
+            MonitorSay("the screen is closed");
+        }
+        else if (rest.empty() || rest == "on")
+        {
+            if (Screen_Open())
+                MonitorSay("the screen is open");
+            else
+                MonitorSay("no screen: see the emulator's own output");
+        }
+        else
+        {
+            MonitorSay("usage: monitor screen on|off");
+        }
+        return;
+    }
+
+    if (word == "screenshot")
+    {
+        if (rest.empty())
+        {
+            MonitorSay("usage: monitor screenshot FILE");
+            return;
+        }
+        if (Screen_Save(rest.c_str()))
+            MonitorSay("written: " + rest);
+        else
+            MonitorSay("cannot write " + rest);
+        return;
+    }
+
+    MonitorSay("no such command: " + word);
+    MonitorHelp();
+}
+
 // Which processor stopped: the one sitting on a breakpoint of its own.
 // With nothing to go by -- a step, an interrupt -- the answer is
 // whichever one is selected.
@@ -1158,6 +1322,22 @@ bool HandlePacket(const std::string& packet)
             return SendPacket("m" + FormatId(PROC_CPU) + "," + FormatId(PROC_PPU));
         if (packet == "qsThreadInfo")
             return SendPacket("l");
+        if (packet.compare(0, 6, "qRcmd,") == 0)
+        {
+            // The command itself is hex, like every string the protocol
+            // carries.
+            std::string line;
+            for (size_t pos = 6; pos + 1 < packet.size(); pos += 2)
+            {
+                int high = HexValue(packet[pos]);
+                int low = HexValue(packet[pos + 1]);
+                if (high < 0 || low < 0)
+                    return SendPacket("E01");
+                line.push_back((char)((high << 4) | low));
+            }
+            MonitorCommand(line);
+            return SendPacket("OK");
+        }
         if (packet.compare(0, 17, "qThreadExtraInfo,") == 0)
         {
             // What to call them in a thread list.  Hex, like every
