@@ -1219,17 +1219,24 @@ void GdbServer_Run(int port, bool okDebugCpu, int maxFrames)
     socket_t listener = Listen(port);
     if (listener == INVALID_SOCKET_VALUE)
     {
-        std::wcout << L" Cannot listen on port " << port << L"." << std::endl;
+        std::wcout << L" Cannot listen on port " << std::to_wstring(port)
+               << L"." << std::endl;
         return;
     }
 
     g_selected = okDebugCpu ? PROC_CPU : PROC_PPU;
     g_maxFrames = maxFrames;
 
-    std::wcout << L"Listening on localhost:" << port << L" for "
-               << (IsCpu(g_selected) ? L"CPU" : L"PPU")
+    // to_wstring, not the stream: this program imbues its output with
+    // the environment's locale, and a locale that groups thousands
+    // prints port 32788 as "32,788" -- which is not a port, and not
+    // what anything reading this line is looking for. (uknc-run waits
+    // for exactly this line and waited in vain on a US-English
+    // runner.) A number that is really a name is printed as one.
+    std::wcout << L"Listening on localhost:" << std::to_wstring(port)
+               << L" for " << (IsCpu(g_selected) ? L"CPU" : L"PPU")
                << L" first; in gdb say" << std::endl;
-    std::wcout << L"  target remote :" << port << std::endl;
+    std::wcout << L"  target remote :" << std::to_wstring(port) << std::endl;
 
     // Waiting for gdb to turn up, in steps rather than in one blocking
     // accept: with a window open, this is the longest the machine ever
