@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Emulator.h"
+#include "emubase/Emubase.h"
 #include "Screen.h"
 
 //////////////////////////////////////////////////////////////////////
@@ -138,6 +139,130 @@ uint64_t g_nextFrameAt = 0;
 uint64_t g_lastFrameAt = 0;
 const uint64_t kMinFrameNanoseconds = 10 * 1000 * 1000;
 
+// What the machine calls the key that was pressed.
+//
+// Ported from UKNCBTL's own Qt front end, where these tables are
+// indexed by Qt's key codes: for everything printable those are the
+// ASCII of the character in upper case, which is what an SDL keycode
+// becomes after toupper().  Two tables, because the machine's keyboard
+// has two alphabets on it and its own register says which one is in
+// use -- the same choice the Qt front end makes.
+//
+// A few keys are filled in here: comma, minus, full stop, slash, colon
+// and semicolon are zero in the Latin table as it comes from there, and
+// a command line without them is no use.  The codes are the ones the
+// server's own typing already uses (KEYS_FOR_CHARS in GdbServer.cpp),
+// which came from UKNCBTL's keyboard view in the first place; every
+// letter and digit in the two agrees.
+const uint8_t kKeysLatin[256] =
+{
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0113, 0004, 0151, 0172, 0000, 0116, 0154, 0133,
+    0134, 0000, 0000, 0000, 0117, 0175, 0135, 0173,
+    0176, 0030, 0031, 0032, 0013, 0034, 0035, 0016,
+    0017, 0177, 0174, 0007, 0000, 0000, 0000, 0000,
+    0000, 0072, 0076, 0050, 0057, 0033, 0047, 0055,
+    0156, 0073, 0027, 0052, 0056, 0112, 0054, 0075,
+    0053, 0067, 0074, 0111, 0114, 0051, 0137, 0071,
+    0115, 0070, 0157, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+};
+
+const uint8_t kKeysRussian[256] =
+{
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0113, 0004, 0151, 0172, 0000, 0116, 0154, 0133,
+    0134, 0000, 0000, 0000, 0117, 0171, 0152, 0173,
+    0176, 0030, 0031, 0032, 0013, 0034, 0035, 0016,
+    0017, 0177, 0174, 0007, 0000, 0000, 0000, 0000,
+    0000, 0047, 0073, 0111, 0071, 0051, 0072, 0053,
+    0074, 0036, 0075, 0056, 0057, 0115, 0114, 0037,
+    0157, 0027, 0052, 0070, 0033, 0055, 0112, 0050,
+    0110, 0054, 0067, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+    0000, 0000, 0000, 0000, 0000, 0000, 0000, 0000,
+};
+
+uint8_t ScancodeForKey(SDL_Keycode key)
+{
+    // The keys with no character to them, which no table can hold.
+    switch (key)
+    {
+    case SDLK_DOWN:      return 0134;
+    case SDLK_UP:        return 0154;
+    case SDLK_LEFT:      return 0116;
+    case SDLK_RIGHT:     return 0133;
+    case SDLK_RETURN:    return 0166;
+    case SDLK_KP_ENTER:  return 0166;
+    case SDLK_TAB:       return 0026;
+    case SDLK_LSHIFT:    return 0105;  // HP
+    case SDLK_RSHIFT:    return 0105;
+    case SDLK_SPACE:     return 0113;
+    case SDLK_BACKSPACE: return 0132;  // ZB
+    case SDLK_LCTRL:     return 0046;  // SU
+    case SDLK_RCTRL:     return 0046;
+    case SDLK_F1:        return 0010;
+    case SDLK_F2:        return 0011;
+    case SDLK_F3:        return 0012;
+    case SDLK_F4:        return 0014;
+    case SDLK_F5:        return 0015;
+    case SDLK_F7:        return 0152;  // UST
+    case SDLK_F8:        return 0151;  // ISP
+    default:             break;
+    }
+
+    if (key < 32 || key > 255)
+        return 0;
+
+    const uint8_t* table =
+        (g_pBoard->GetKeyboardRegister() & KEYB_LAT) != 0
+        ? kKeysLatin : kKeysRussian;
+    return table[toupper((int)key)];
+}
+
 // Whatever the window manager has to say.  Closing the window is the
 // one thing it can say that means anything here, and what it means is
 // "enough": the machine stops, and whoever waits or runs sees that
@@ -154,6 +279,25 @@ void HandleEvents()
             g_okQuitRequested = true;
             Screen_Close();
             return;
+        }
+
+        // A window somebody is typing into is a machine somebody is
+        // typing into, and SDL only sends these to the window in front
+        // -- so this is exactly "when the window has the keyboard".
+        // Repeats are left out: the machine's own keyboard sends a
+        // scancode when a key goes down and another when it comes up,
+        // and repeating is somebody else's business.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
+        {
+            uint8_t scancode = ScancodeForKey(event.key.key);
+            if (scancode != 0)
+                Emulator_KeyEvent(scancode, true);
+        }
+        else if (event.type == SDL_EVENT_KEY_UP)
+        {
+            uint8_t scancode = ScancodeForKey(event.key.key);
+            if (scancode != 0)
+                Emulator_KeyEvent(scancode, false);
         }
     }
 }
@@ -283,6 +427,7 @@ bool Screen_QuitRequested()
 {
     return g_okQuitRequested;
 }
+
 
 void Screen_Close()
 {

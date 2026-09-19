@@ -64,8 +64,22 @@ BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
 PKG_CONFIG := PKG_CONFIG_PATH="$(PKG_CONFIG_PATH):$(BREW_PREFIX)/lib/pkgconfig" pkg-config
 
 SDL3_LIBS := $(shell $(PKG_CONFIG) --libs sdl3 2>/dev/null)
+SDL3_INCLUDE := $(shell $(PKG_CONFIG) --cflags sdl3 2>/dev/null)
+
+# No pkg-config at all, or one that has not heard of SDL3: ask Homebrew
+# where it put it.  Worth the four lines -- this machine lost its
+# pkg-config with the package manager that installed it, and the next
+# build came out without a screen and said so to nobody.
+ifeq ($(SDL3_LIBS),)
+SDL3_PREFIX := $(shell brew --prefix sdl3 2>/dev/null)
+ifneq ($(wildcard $(SDL3_PREFIX)/include/SDL3/SDL.h),)
+SDL3_INCLUDE := -I$(SDL3_PREFIX)/include
+SDL3_LIBS := -L$(SDL3_PREFIX)/lib -Wl,-rpath,$(SDL3_PREFIX)/lib -lSDL3
+endif
+endif
+
 ifneq ($(SDL3_LIBS),)
-SDL3_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl3 2>/dev/null) -DHAVE_SDL3
+SDL3_CFLAGS := $(SDL3_INCLUDE) -DHAVE_SDL3
 endif
 
 # --- Configuration-specific flags -------------------------------------------

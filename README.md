@@ -52,6 +52,11 @@ one -- so each has a symbol table of its own, which is what lets a program loade
 be debugged with its own symbols. A gdb that does not ask for the multiprocess extension gets
 the same two as threads of one process instead.
 
+While the window has the keyboard, keys go to the machine: the same table
+UKNCBTL's own front ends use, and the machine's own register decides which of
+its two alphabets a key means. They take effect as it runs -- one stopped at a
+breakpoint takes what it was given at the next `continue`.
+
 `--screen` needs SDL3 (`brew install sdl3`, `apt install libsdl3-dev`); the Makefile finds it
 with pkg-config, and a build without it is the same build minus that option. The window is
 resizable, and closing it stops the machine: that is the only way to say "enough" to a machine

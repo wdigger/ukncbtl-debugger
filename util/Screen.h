@@ -4,6 +4,11 @@
 // the showing, and Screen.cpp is the only file that knows that; a build
 // without SDL3 keeps every function here, doing nothing.
 //
+// The window is also where somebody types: while it has the keyboard,
+// keys go to the machine rather than anywhere else.  They take effect
+// as the machine runs, like everything else done to it, so a machine
+// stopped at a breakpoint takes what it is given at the next continue.
+//
 // Doing nothing is also the normal case at run time.  The emulator is
 // usually driven by uknc-run or by an editor, where a window would be
 // in the way, so there is none unless --screen asks for one, and every
