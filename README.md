@@ -136,6 +136,13 @@ a line through to the other end, and this is what the other end does with it:
 | `monitor disk N FILE` | put a floppy image in drive N (1–4) |
 | `monitor screen on`, `off` | show its screen in a window, or stop |
 | `monitor screenshot FILE` | write the screen to FILE, as a BMP |
+| `monitor prof on`, `off` | count CPU ticks per instruction address |
+| `monitor prof` | how much has been counted so far |
+| `monitor prof reset` | throw that away and start again |
+| `monitor prof top [N]` | the busiest N addresses, 20 by default |
+| `monitor prof save FILE` | every counted address, with its ticks |
+| `monitor prof ppu ...` | any of those, for the second processor |
+| `monitor fault on`, `off` | stop where a program halts |
 
 `frames` is the odd one: between stops the machine is not running, so nothing typed at it has
 happened yet, and this is how time passes when there is no program to continue. A whole session
@@ -151,6 +158,58 @@ and the program's own output comes back in the terminal as it goes. The screensh
 from the machine's memory rather than from anything on screen, so it works with no window open
 and in a build with no SDL3 — which is the point: a program that draws is otherwise hard to
 check from a script.
+
+`prof` is not a sampling profiler. The core steps the CPU one clock tick at a time, so every
+tick is charged to the address of the instruction being executed at that moment: what comes
+back is an exact count of ticks per address, the same on every run of the same program. One
+frame is 160000 of them. Counting costs the execution path that checks breakpoints, which is
+why it is asked for rather than always on.
+
+Addresses and no names — the symbols are in the program's ELF, which is gdb's end of this.
+`info line *0123456` there answers with the file and line; `prof save` writes every counted
+address for `addr2line -f`, which answers with the function too:
+
+```
+(gdb) monitor prof reset
+(gdb) monitor prof on
+(gdb) monitor frames 50
+(gdb) monitor prof off
+(gdb) monitor prof top 4
+profiling is off, 8000000 ticks counted (50.0 frames)
+011520     1139016  14.24%
+011532     1030181  12.88%
+011526      813681  10.17%
+010350      417312   5.22%
+```
+
+The first three addresses are one spin loop in `wait_vsync` — 37% of the machine's time spent
+waiting for the frame it draws into — and the fourth is the drawing itself.
+
+`prof ppu` counts the second processor the same way, and it is worth counting: half of what
+this machine does it does there, and the CPU profile shows only how long the CPU waited, never
+what the wait was spent on. A frame is 125000 PPU ticks against the CPU's 160000, the two being
+stepped 12.5 and 16 times per board tick. One thing to watch when naming those addresses: a PPU
+module is loaded at an address picked at run time, while its `.ppu.elf` is linked at 0, so the
+load base comes off first — `ppu.gdb` prints it ("PPU symbols from … at 023666"), and
+`addr2line` wants the difference.
+
+`fault on` catches a program that executes HALT. That hands it to the monitor for good, which
+from outside looks like a hang — a run waiting for the program's output waits for ever, with
+nothing said. With this the machine stops instead, and gdb is told SIGABRT:
+
+```
+(gdb) monitor fault on
+(gdb) run
+about to halt
+CPU halted at 001166
+
+Thread 1.1 received signal SIGABRT, Aborted.
+0x0000e0a0 in ?? ()
+```
+
+The address to go by is the one in the message — `addr2line` puts 001166 in `main` — and not
+gdb's own PC, which by then is already inside the firmware's halt handler at 0160240. Hence
+the message: the place is known where the HALT is executed, and nowhere after it.
 
 Registers, memory, breakpoints, stepping, frames, arguments and locals all work; the last three
 come from the call frame information the compiler emits, so they need `-g`. A backtrace ends at

@@ -181,6 +181,13 @@ CMotherboard::CMotherboard ()
     m_CPUProfHist = static_cast<uint32_t*>(::calloc(65536, sizeof(uint32_t)));
     m_CPUProfPC = 0;
     m_CPUProfTotal = 0;
+    m_PPUProfArmed = false;
+    m_PPUProfHist = static_cast<uint32_t*>(::calloc(65536, sizeof(uint32_t)));
+    m_PPUProfPC = 0;
+    m_PPUProfTotal = 0;
+    m_FaultStop = false;
+    m_FaultWho = 0;
+    m_FaultPC = 0;
     m_TapeReadCallback = nullptr;
     m_TapeWriteCallback = nullptr;
     m_nTapeSampleRate = 0;
@@ -245,6 +252,7 @@ CMotherboard::CMotherboard ()
 CMotherboard::~CMotherboard ()
 {
     ::free(m_CPUProfHist);
+    ::free(m_PPUProfHist);
     // Delete bus devices
     CBusDevice** ppDevice = m_pCpuDevices;
     while (*ppDevice != nullptr)
@@ -773,14 +781,41 @@ inline void CMotherboard::ProfileCPUTick()
     m_CPUProfTotal++;
 }
 
+void CMotherboard::ResetPPUProfile()
+{
+    memset(m_PPUProfHist, 0, 65536 * sizeof(uint32_t));
+    m_PPUProfTotal = 0;
+    m_PPUProfPC = 0;
+}
+
+// The same charging rule, for the second processor. It is the one that
+// draws plane 0, and the CPU profile shows only how long the CPU waited
+// for it, never what the wait was spent on.
+inline void CMotherboard::ProfilePPUTick()
+{
+    if (m_pPPU->GetInternalTick() == 0)
+        m_PPUProfPC = m_pPPU->GetPC();
+    m_PPUProfHist[m_PPUProfPC]++;
+    m_PPUProfTotal++;
+}
+
 #define FRAMETICKS 10000  // Количество тиков в одном фрейме
 #define SYSTEMFRAME_EXECUTE_CPU     { m_pCPU->Execute(); }
 #define SYSTEMFRAME_EXECUTE_PPU     { m_pPPU->Execute(); }
+// A halt by either processor hands the program to the monitor, and
+// from outside that looks like a hang. Catching it here lets the
+// debugger stop where it happened.
+#define SYSTEMFRAME_FAULT(who, cpu)  { if (m_FaultStop && (cpu)->IsHalted()) \
+    { m_FaultWho = (who); m_FaultPC = (cpu)->GetHaltedAt(); \
+      (cpu)->ClearHalted(); return false; } }
 #define SYSTEMFRAME_EXECUTE_BP_CPU  { if (m_CPUProfArmed) ProfileCPUTick(); m_pCPU->Execute(); \
+    SYSTEMFRAME_FAULT(1, m_pCPU) \
     if (m_CPUWatchArmed && CheckCPUWatchpoint()) return false; \
     if (m_CPUbps != nullptr) \
     { const uint16_t* pbps = m_CPUbps; while(*pbps != 0177777) { if (m_pCPU->GetPC() == *pbps++) return false; } } }
-#define SYSTEMFRAME_EXECUTE_BP_PPU  { m_pPPU->Execute(); if (m_PPUbps != nullptr) \
+#define SYSTEMFRAME_EXECUTE_BP_PPU  { if (m_PPUProfArmed) ProfilePPUTick(); m_pPPU->Execute(); \
+    SYSTEMFRAME_FAULT(2, m_pPPU) \
+    if (m_PPUbps != nullptr) \
     { const uint16_t* pbps = m_PPUbps; while(*pbps != 0177777) { if (m_pPPU->GetPC() == *pbps++) return false; } } }
 bool CMotherboard::SystemFrame()
 {
@@ -806,7 +841,8 @@ bool CMotherboard::SystemFrame()
             Tick50();  // 1/50 timer event
 
         // CPU - 16 times, PPU - 12.5 times
-        if (m_CPUbps == nullptr && m_PPUbps == nullptr && !m_CPUWatchArmed && !m_CPUProfArmed)  // No breakpoints, no need to check
+        if (m_CPUbps == nullptr && m_PPUbps == nullptr && !m_CPUWatchArmed && !m_CPUProfArmed
+            && !m_PPUProfArmed && !m_FaultStop)  // No breakpoints, no need to check
         {
             /*  0 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU
             /*  1 */  SYSTEMFRAME_EXECUTE_CPU  SYSTEMFRAME_EXECUTE_PPU

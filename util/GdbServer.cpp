@@ -22,6 +22,8 @@ typedef int socket_t;
 #define CloseSocket close
 #endif
 
+#include <algorithm>
+
 #include "Emulator.h"
 #include "emubase/Emubase.h"
 #include "GdbServer.h"
@@ -566,6 +568,8 @@ void FlushConsoleOutput()
     SendPacket("O" + hex);
 }
 
+void MonitorSay(const std::string& text);
+
 int RunUntilStop()
 {
     // Resuming from an address that has a breakpoint on it would trip
@@ -600,7 +604,25 @@ int RunUntilStop()
         Screen_Pace();
         FlushConsoleOutput();
         if (okHitBreakpoint)
+        {
+            // A fault is not a breakpoint: the program did something
+            // the machine cannot do, and the monitor was about to take
+            // it over. Say so with the signal that fits, the way any
+            // target does -- gdb prints it and stops where it happened.
+            int who = g_pBoard->GetFaultWho();
+            if (who != 0)
+            {
+                char line[96];
+
+                snprintf(line, sizeof(line),
+                         "%s halted at %06o", who == 1 ? "CPU" : "PPU",
+                         g_pBoard->GetFaultPC());
+                MonitorSay(line);
+                g_pBoard->ClearFault();
+                signal = 6;                                 // SIGABRT
+            }
             break;
+        }
         if (g_okProgramExited)
         {
             // .EXIT happens while the last of what was written is
@@ -795,6 +817,208 @@ void SplitCommand(const std::string& line, std::string* word,
     *rest = (restStart == std::string::npos) ? "" : line.substr(restStart);
 }
 
+// "prof" -- the tick profiler the machine has had all along.
+//
+// The core steps the CPU one clock tick per Execute(), and Board.cpp's
+// ProfileCPUTick() charges each of those to the address of the
+// instruction being executed at that moment.  So what comes out is not
+// a sample of where the time goes: it is a count of ticks per address,
+// exact, and the same on every run of the same program.  Arming it puts
+// the CPU on the execution path that checks breakpoints, which is the
+// whole of what it costs.
+//
+// Addresses and no names.  The symbols are in the program's own ELF,
+// which is gdb's business rather than this machine's: "info line
+// *0123456" there answers with the file and line over this same
+// connection, and "prof save" writes the lot for a script to put
+// through addr2line -f, which answers with the function as well.
+// ("info symbol" is the wrong one of the two -- it goes by the nearest
+// symbol of any kind, and with -g that is an assembler label inside the
+// function rather than the function.)
+//
+// A frame is FRAMETICKS of the board's own ticks (Board.cpp), and the
+// two processors are stepped at different rates within it: 16 times
+// each for the CPU, 12.5 for the PPU.  Counts are easier to place
+// against a number of frames than against nothing.
+static const double kCPUTicksPerFrame = 160000.0;
+static const double kPPUTicksPerFrame = 125000.0;
+
+// Which of the two processors a "prof" command is about. The second one
+// draws plane 0, and the CPU profile shows only how long the CPU waited
+// for it, never what the wait was spent on -- so it has a profile of its
+// own, counted the same way and read by the same commands.
+static bool ProfIsOn(bool ppu)
+{
+    return ppu ? g_pBoard->IsPPUProfiling() : g_pBoard->IsCPUProfiling();
+}
+
+static const uint32_t* ProfHistogram(bool ppu)
+{
+    return ppu ? g_pBoard->GetPPUProfile() : g_pBoard->GetCPUProfile();
+}
+
+static uint64_t ProfTotal(bool ppu)
+{
+    return ppu ? g_pBoard->GetPPUProfileTotal() : g_pBoard->GetCPUProfileTotal();
+}
+
+void MonitorProfStatus(bool ppu)
+{
+    uint64_t total = ProfTotal(ppu);
+    char line[128];
+    snprintf(line, sizeof(line),
+             "%s profiling is %s, %llu ticks counted (%.1f frames)",
+             ppu ? "ppu" : "cpu", ProfIsOn(ppu) ? "on" : "off",
+             (unsigned long long)total,
+             (double)total / (ppu ? kPPUTicksPerFrame : kCPUTicksPerFrame));
+    MonitorSay(line);
+}
+
+// The busiest addresses, most ticks first.  Enough on its own to say
+// which loop the program is in; "info line *0NNNNNN" in gdb says which
+// line of which file it is.
+void MonitorProfTop(bool ppu, const std::string& rest)
+{
+    int count = rest.empty() ? 20 : atoi(rest.c_str());
+    if (count <= 0)
+    {
+        MonitorSay("usage: monitor prof top [N]");
+        return;
+    }
+
+    const uint32_t* histogram = ProfHistogram(ppu);
+    uint64_t total = ProfTotal(ppu);
+    MonitorProfStatus(ppu);
+    if (total == 0)
+        return;
+
+    std::vector<uint32_t> counted;
+    for (uint32_t address = 0; address < 65536; address++)
+    {
+        if (histogram[address] != 0)
+            counted.push_back(address);
+    }
+    auto busier = [histogram](uint32_t left, uint32_t right)
+    {
+        return histogram[left] > histogram[right];
+    };
+    if (counted.size() > (size_t)count)
+    {
+        std::partial_sort(counted.begin(), counted.begin() + count,
+                          counted.end(), busier);
+        counted.resize(count);
+    }
+    else
+    {
+        std::sort(counted.begin(), counted.end(), busier);
+    }
+
+    for (uint32_t address : counted)
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "%06o  %10u  %5.2f%%", address,
+                 histogram[address],
+                 100.0 * (double)histogram[address] / (double)total);
+        MonitorSay(line);
+    }
+}
+
+// The whole histogram, one "address ticks" line per address that has
+// any -- octal, as everything about this machine is written down.
+void MonitorProfSave(bool ppu, const std::string& path)
+{
+    const uint32_t* histogram = ProfHistogram(ppu);
+    FILE* file = ::fopen(path.c_str(), "w");
+    if (file == nullptr)
+    {
+        MonitorSay("cannot write " + path);
+        return;
+    }
+    size_t lines = 0;
+    for (uint32_t address = 0; address < 65536; address++)
+    {
+        if (histogram[address] == 0)
+            continue;
+        ::fprintf(file, "%06o %u\n", address, histogram[address]);
+        lines++;
+    }
+    ::fclose(file);
+    MonitorSay("written: " + path + ", " + std::to_string(lines) +
+               " addresses");
+}
+
+void MonitorProf(const std::string& rest)
+{
+    std::string what, more;
+    SplitCommand(rest, &what, &more);
+
+    // "ppu" in front of any of them says which processor is meant.
+    bool ppu = (what == "ppu");
+    if (ppu)
+    {
+        std::string tail = more;    // SplitCommand reads its line while it writes rest
+        SplitCommand(tail, &what, &more);
+    }
+
+    if (what.empty())
+        MonitorProfStatus(ppu);
+    else if (what == "on")
+    {
+        if (ppu)
+            g_pBoard->SetPPUProfiling(true);
+        else
+            g_pBoard->SetCPUProfiling(true);
+        // Not zeroed here: counting across several runs is the point of
+        // having on and reset be different things.
+        MonitorProfStatus(ppu);
+    }
+    else if (what == "off")
+    {
+        if (ppu)
+            g_pBoard->SetPPUProfiling(false);
+        else
+            g_pBoard->SetCPUProfiling(false);
+        MonitorProfStatus(ppu);
+    }
+    else if (what == "reset")
+    {
+        if (ppu)
+            g_pBoard->ResetPPUProfile();
+        else
+            g_pBoard->ResetCPUProfile();
+        MonitorSay("the profile has been zeroed");
+    }
+    else if (what == "top")
+        MonitorProfTop(ppu, more);
+    else if (what == "save")
+    {
+        if (more.empty())
+            MonitorSay("usage: monitor prof save FILE");
+        else
+            MonitorProfSave(ppu, more);
+    }
+    else
+        MonitorSay("usage: monitor prof [ppu] [on|off|reset|top [N]|save FILE]");
+}
+
+// "fault on|off" -- stop the machine where a program falls over.
+void MonitorFault(const std::string& rest)
+{
+    if (rest == "on")
+        g_pBoard->SetFaultStop(true);
+    else if (rest == "off")
+        g_pBoard->SetFaultStop(false);
+    else if (!rest.empty())
+    {
+        MonitorSay("usage: monitor fault [on|off]");
+        return;
+    }
+
+    MonitorSay(g_pBoard->IsFaultStop()
+               ? "stopping where a program halts"
+               : "a halt is left to the monitor, as the machine does");
+}
+
 void MonitorHelp()
 {
     MonitorSay("monitor reset            switch the machine off and on");
@@ -803,6 +1027,13 @@ void MonitorHelp()
     MonitorSay("monitor disk N FILE      put a floppy image in drive N (1-4)");
     MonitorSay("monitor screen on|off    show the machine's screen, or stop");
     MonitorSay("monitor screenshot FILE  write the screen to FILE, as a BMP");
+    MonitorSay("monitor prof on|off      count CPU ticks per instruction");
+    MonitorSay("monitor prof             how much has been counted so far");
+    MonitorSay("monitor prof reset       throw that away and start again");
+    MonitorSay("monitor prof top [N]     the busiest N addresses, 20 by default");
+    MonitorSay("monitor prof save FILE   every counted address, with its ticks");
+    MonitorSay("monitor prof ppu ...     the same, for the second processor");
+    MonitorSay("monitor fault on|off     stop where a program halts");
 }
 
 // Carries out one command.  Everything it has to say goes back through
@@ -848,14 +1079,33 @@ void MonitorCommand(const std::string& line)
             return;
         }
         Emulator_Start();
-        for (int i = 0; i < frames && g_okEmulatorRunning; i++)
+        int ran = 0;
+        for (; ran < frames && g_okEmulatorRunning; ran++)
         {
             Emulator_SystemFrame();
             Screen_Frame();
+            if (g_pBoard->GetFaultWho() != 0)
+                break;
         }
         Emulator_Stop();
         FlushConsoleOutput();
-        MonitorSay("ran " + std::to_string(frames) + " frames");
+
+        // A program that fell over stops the count where it happened:
+        // running on past that only buries the place.
+        if (g_pBoard->GetFaultWho() != 0)
+        {
+            char line[96];
+
+            snprintf(line, sizeof(line),
+                     "%s halted at %06o, after %d frames",
+                     g_pBoard->GetFaultWho() == 1 ? "CPU" : "PPU",
+                     g_pBoard->GetFaultPC(), ran);
+            MonitorSay(line);
+            g_pBoard->ClearFault();
+            return;
+        }
+
+        MonitorSay("ran " + std::to_string(ran) + " frames");
         return;
     }
 
@@ -908,6 +1158,18 @@ void MonitorCommand(const std::string& line)
             MonitorSay("written: " + rest);
         else
             MonitorSay("cannot write " + rest);
+        return;
+    }
+
+    if (word == "fault")
+    {
+        MonitorFault(rest);
+        return;
+    }
+
+    if (word == "prof")
+    {
+        MonitorProf(rest);
         return;
     }
 

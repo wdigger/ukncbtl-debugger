@@ -93,6 +93,8 @@ protected:  // Interrupt processing
     bool        m_EMT_rq;           ///< EMT command interrupt pending
     bool        m_TRAPrq;           ///< TRAP command interrupt pending
     uint16_t    m_virq[16];         ///< VIRQ vector
+    bool        m_halted;           ///< the program executed HALT
+    uint16_t    m_haltedAt;         ///< where it did
     bool        m_ACLOreset;        ///< Power fail interrupt request reset
     bool        m_EVNTreset;        ///< EVNT interrupt request reset;
     uint8_t     m_VIRQreset;        ///< VIRQ request reset for given device
@@ -144,6 +146,14 @@ public:  // Processor control
     /// \brief External interrupt via VIRQ signal
     void        InterruptVIRQ(int que, uint16_t interrupt);
     uint16_t    GetVIRQ(int que) { return m_virq[que]; }
+    /// \brief Did the program halt, and where.
+    ///
+    /// A halt hands the program to the monitor for good, and from
+    /// outside that looks like a hang. Remembering it lets the
+    /// debugger stop at the place instead of hunting for it.
+    bool        IsHalted() const { return m_halted; }
+    uint16_t    GetHaltedAt() const { return m_haltedAt; }
+    void        ClearHalted() { m_halted = false; }
     /// \brief Execute one processor tick
     void        Execute();
     /// \brief Process pending interrupt requests

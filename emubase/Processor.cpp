@@ -277,6 +277,8 @@ CProcessor::CProcessor (LPCTSTR name)
     m_DCLOpin = m_ACLOpin = true;
     m_haltpin = false;
 
+    m_halted = false;
+    m_haltedAt = 0;
     m_instruction = m_instructionpc = 0;
     m_regsrc = m_methsrc = 0;
     m_regdest = m_methdest = 0;
@@ -687,6 +689,14 @@ void CProcessor::ExecuteRUN()  // ПУСК / START
 void CProcessor::ExecuteHALT ()  // HALT - Останов
 {
     m_HALTrq = true;
+
+    // A program that halts has stopped being a program: the monitor
+    // takes it over and prints "*** СТОП ***", and from outside that
+    // looks like a hang -- whatever was waiting on it waits for good.
+    // Remembered here, where it happens, so the debugger can stop
+    // at the place instead of hunting for it afterwards.
+    m_haltedAt = GetPC();
+    m_halted = true;
 }
 
 void CProcessor::ExecuteRCPC()  // ЧКСК - Чтение регистра копии счётчика команд

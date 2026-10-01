@@ -196,6 +196,22 @@ public:  // Debug
     void        ResetCPUProfile();
     const uint32_t* GetCPUProfile() const { return m_CPUProfHist; }  ///< 65536 tick counters, indexed by address
     uint64_t    GetCPUProfileTotal() const { return m_CPUProfTotal; }
+
+    void        SetPPUProfiling(bool on) { m_PPUProfArmed = on; }
+    bool        IsPPUProfiling() const { return m_PPUProfArmed; }
+    void        ResetPPUProfile();
+    const uint32_t* GetPPUProfile() const { return m_PPUProfHist; }  ///< 65536 tick counters, indexed by address
+    uint64_t    GetPPUProfileTotal() const { return m_PPUProfTotal; }
+
+    /// \brief Stop the machine as soon as either processor halts.
+    ///
+    /// A halt hands the program to the monitor for good; without this
+    /// it looks like a hang from outside.
+    void        SetFaultStop(bool on) { m_FaultStop = on; }
+    bool        IsFaultStop() const { return m_FaultStop; }
+    int         GetFaultWho() const { return m_FaultWho; }   ///< 1 CPU, 2 PPU, 0 none
+    uint16_t    GetFaultPC() const { return m_FaultPC; }
+    void        ClearFault() { m_FaultWho = 0; }
     uint32_t    GetTrace() const { return m_dwTrace; }
     void        SetTrace(uint32_t dwTrace);
     chan_stc    GetChannelStruct(unsigned char cpu, unsigned char chan, unsigned char tx)
@@ -341,7 +357,15 @@ private:
     uint32_t*   m_CPUProfHist;        ///< [65536] ticks per instruction address
     uint16_t    m_CPUProfPC;          ///< Address of the instruction currently being charged
     uint64_t    m_CPUProfTotal;       ///< Sum of the histogram
+    bool        m_PPUProfArmed;       ///< Tick profiler on, the second processor
+    uint32_t*   m_PPUProfHist;        ///< [65536] ticks per instruction address
+    uint16_t    m_PPUProfPC;          ///< Address of the instruction currently being charged
+    uint64_t    m_PPUProfTotal;       ///< Sum of the histogram
+    bool        m_FaultStop;          ///< Stop on a fault taken by either processor
+    int         m_FaultWho;           ///< 1 CPU, 2 PPU, 0 none
+    uint16_t    m_FaultPC;            ///< where it happened
     inline void ProfileCPUTick();     ///< Charge the coming tick -- call right before m_pCPU->Execute()
+    inline void ProfilePPUTick();     ///< The same, right before m_pPPU->Execute()
     uint32_t    m_dwTrace;  ///< Trace flags
 
     uint16_t    m_timer;
