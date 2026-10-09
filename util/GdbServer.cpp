@@ -173,56 +173,106 @@ CProcessor* Proc()
 // Typing, for starting a program the way a person would
 
 // The machine's keyboard sends hardware matrix scan-codes, not
-// characters, so the few characters an RT-11 command line is made of
-// have to be looked up. Letters are the Latin glyph on the key. From
-// UKNCBTL's own emulator/KeyboardView.cpp.
+// characters, so every character has to be looked up. Letters are the
+// Latin glyph on the key. Six keys carry a second character reached
+// with Shift, and those are marked. From UKNCBTL's own
+// emulator/qkeyboardview.cpp, which is the whole keyboard: a character
+// missing from here is one the machine has no key for at all.
 struct KeyForChar
 {
     char ch;
     uint8_t scancode;
+    bool shift;
 };
 
 const KeyForChar KEYS_FOR_CHARS[] =
 {
-    { 'A', 0072 }, { 'B', 0076 }, { 'C', 0050 }, { 'D', 0057 },
-    { 'E', 0033 }, { 'F', 0047 }, { 'G', 0055 }, { 'H', 0156 },
-    { 'I', 0073 }, { 'J', 0027 }, { 'K', 0052 }, { 'L', 0056 },
-    { 'M', 0112 }, { 'N', 0054 }, { 'O', 0075 }, { 'P', 0053 },
-    { 'Q', 0067 }, { 'R', 0074 }, { 'S', 0111 }, { 'T', 0114 },
-    { 'U', 0051 }, { 'V', 0137 }, { 'W', 0071 }, { 'X', 0115 },
-    { 'Y', 0070 }, { 'Z', 0157 },
-    { '0', 0176 }, { '1', 0030 }, { '2', 0031 }, { '3', 0032 },
-    { '4', 0013 }, { '5', 0034 }, { '6', 0035 }, { '7', 0016 },
-    { '8', 0017 }, { '9', 0177 },
-    { '.', 0135 }, { ',', 0117 }, { ';', 0007 }, { ':', 0174 },
-    { '-', 0175 }, { '/', 0173 },
-    { ' ', 0113 },  // SPACE
-    { '\r', 0153 },  // ENTER
+    { 'A', 0072, false }, { 'B', 0076, false }, { 'C', 0050, false },
+    { 'D', 0057, false }, { 'E', 0033, false }, { 'F', 0047, false },
+    { 'G', 0055, false }, { 'H', 0156, false }, { 'I', 0073, false },
+    { 'J', 0027, false }, { 'K', 0052, false }, { 'L', 0056, false },
+    { 'M', 0112, false }, { 'N', 0054, false }, { 'O', 0075, false },
+    { 'P', 0053, false }, { 'Q', 0067, false }, { 'R', 0074, false },
+    { 'S', 0111, false }, { 'T', 0114, false }, { 'U', 0051, false },
+    { 'V', 0137, false }, { 'W', 0071, false }, { 'X', 0115, false },
+    { 'Y', 0070, false }, { 'Z', 0157, false },
+    { '0', 0176, false }, { '1', 0030, false }, { '2', 0031, false },
+    { '3', 0032, false }, { '4', 0013, false }, { '5', 0034, false },
+    { '6', 0035, false }, { '7', 0016, false }, { '8', 0017, false },
+    { '9', 0177, false },
+    { '.', 0135, false }, { ',', 0117, false }, { ';', 0007, false },
+    { ':', 0174, false }, { '-', 0175, false }, { '/', 0173, false },
+    { '[', 0036, false }, { ']', 0037, false }, { '\\', 0136, false },
+    { '^', 0110, false }, { '@', 0077, false },
+    { ' ', 0113, false },   // SPACE
+    { '\r', 0153, false },  // ENTER
+    { '\t', 0026, false },  // TAB
+    { '\b', 0132, false },  // Backspace
+    // The other half of the keys that carry two characters. Without
+    // these an RT-11 command line cannot be typed at all: the CSI
+    // prompt's own syntax is output,map=input, and * and ? are how
+    // every utility is given a wildcard.
+    { '=', 0175, true }, { '?', 0173, true }, { '+', 0007, true },
+    { '*', 0174, true }, { '>', 0135, true }, { '<', 0117, true },
 };
+
+// Shift, for the characters that share a key with another one.
+const uint8_t KEY_SHIFT = 0105;
 
 // Enough frames around each press and release for the machine to see it.
 const int KEY_HOLD_FRAMES = 6;
 
-void TypeLine(const std::string& text)
+// Holds one key down, or lets it go, and gives the machine time to
+// notice. Every frame here goes through Emulator_SystemFrame because
+// that is what moves events out of the keyboard queue and into the
+// machine, one per frame. Running the board directly instead leaves the
+// queue to fill: it holds 32 events, a character costs two, so the
+// seventeenth character of a line and everything after it used to be
+// dropped without a word.
+static void TypeKey(uint8_t scancode, bool pressed)
 {
+    Emulator_KeyEvent(scancode, pressed);
+    for (int i = 0; i < KEY_HOLD_FRAMES; i++)
+        Emulator_SystemFrame();
+}
+
+// Types TEXT as at the keyboard. Returns the characters the keyboard
+// has no key for, each one once, so that the caller can say what did
+// not get typed rather than leaving a command line quietly short of it.
+std::string TypeLine(const std::string& text)
+{
+    std::string missing;
+
     for (char ch : text)
     {
         char wanted = (ch == '\n') ? '\r' : (char)toupper((unsigned char)ch);
+        const KeyForChar* found = nullptr;
 
         for (const KeyForChar& key : KEYS_FOR_CHARS)
         {
-            if (key.ch != wanted)
-                continue;
-
-            Emulator_KeyEvent(key.scancode, true);
-            for (int i = 0; i < KEY_HOLD_FRAMES; i++)
-                g_pBoard->SystemFrame();
-            Emulator_KeyEvent(key.scancode, false);
-            for (int i = 0; i < KEY_HOLD_FRAMES; i++)
-                g_pBoard->SystemFrame();
-            break;
+            if (key.ch == wanted)
+            {
+                found = &key;
+                break;
+            }
         }
+
+        if (found == nullptr)
+        {
+            if (missing.find(ch) == std::string::npos)
+                missing += ch;
+            continue;
+        }
+
+        if (found->shift)
+            TypeKey(KEY_SHIFT, true);
+        TypeKey(found->scancode, true);
+        TypeKey(found->scancode, false);
+        if (found->shift)
+            TypeKey(KEY_SHIFT, false);
     }
+
+    return missing;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1061,8 +1111,10 @@ void MonitorCommand(const std::string& line)
     {
         // Typed as at the keyboard, Enter and all: what this is for is
         // the machine's own command line, which is waiting for one.
-        TypeLine(rest + "\r");
+        std::string missing = TypeLine(rest + "\r");
         MonitorSay("typed: " + rest);
+        if (!missing.empty())
+            MonitorSay("the keyboard has no key for: " + missing);
         return;
     }
 
