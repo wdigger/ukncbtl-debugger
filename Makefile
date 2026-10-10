@@ -82,6 +82,14 @@ ifneq ($(SDL3_LIBS),)
 SDL3_CFLAGS := $(SDL3_INCLUDE) -DHAVE_SDL3
 endif
 
+# --- zlib -------------------------------------------------------------------
+#
+# For the PNG the screen is sent back as (util/Screen.cpp): deflate is
+# what makes it a few kilobytes instead of the half megabyte the picture
+# is.  Every platform this builds on has zlib -- macOS and Linux in the
+# SDK, mingw in the toolchain -- so it is not made optional.
+ZLIB_LIBS := -lz
+
 # --- Configuration-specific flags -------------------------------------------
 
 RELEASE_DIR   := build/release
@@ -108,10 +116,10 @@ DEBUG_OBJS   := $(patsubst %.cpp,$(DEBUG_DIR)/%.o,$(SRCS))
 # --- Link -------------------------------------------------------------------
 
 $(RELEASE_DIR)/$(TARGET): $(RELEASE_OBJS)
-	$(CXX) $(RELEASE_OBJS) $(SDL3_LIBS) $(PLATFORM_LIBS) -o $@
+	$(CXX) $(RELEASE_OBJS) $(SDL3_LIBS) $(ZLIB_LIBS) $(PLATFORM_LIBS) -o $@
 
 $(DEBUG_DIR)/$(TARGET): $(DEBUG_OBJS)
-	$(CXX) $(DEBUG_OBJS) $(SDL3_LIBS) $(PLATFORM_LIBS) -o $@
+	$(CXX) $(DEBUG_OBJS) $(SDL3_LIBS) $(ZLIB_LIBS) $(PLATFORM_LIBS) -o $@
 
 # --- Compile ------------------------------------------------------------
 

@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <vector>
+
 // Opens the window.  Returns false, having said why, if SDL cannot --
 // which is not fatal to anything: the machine runs on unwatched.
 bool Screen_Open();
@@ -55,6 +57,10 @@ void Screen_Idle();
 // check from a script otherwise.  False, having said why, if the file
 // cannot be written.
 bool Screen_Save(const char* path);
+
+// The screen as a PNG in memory, for a driver that has no way to read a
+// file this program wrote.
+bool Screen_Png(std::vector<uint8_t>* out);
 
 bool Screen_IsOpen();
 

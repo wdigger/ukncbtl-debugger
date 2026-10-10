@@ -604,6 +604,8 @@ bool RemoveBreakpoint(uint16_t address)
 const int STOPPED_EXITED = -1;    // The program called .EXIT
 const int STOPPED_TIMEOUT = -2;   // It ran past the frame bound
 
+void SendOutputText(const std::string& text);
+
 // Hand gdb whatever the program has printed since last time, as an "O"
 // packet -- the one thing a stub may send while the program is running.
 void FlushConsoleOutput()
@@ -611,11 +613,9 @@ void FlushConsoleOutput()
     if (g_consoleOutput.empty())
         return;
 
-    std::string hex;
-    for (char ch : g_consoleOutput)
-        AppendByte(hex, (uint8_t)ch);
-    g_consoleOutput.clear();
-    SendPacket("O" + hex);
+    std::string text;
+    text.swap(g_consoleOutput);
+    SendOutputText(text);
 }
 
 void MonitorSay(const std::string& text);
@@ -833,15 +833,100 @@ bool StartProgram(const std::string& name, std::string* error)
 // follows "monitor" through as qRcmd and prints back whatever comes of
 // it, which is exactly the shape of that.
 
-// One line of it, back to gdb: an O packet, the same one the program's
-// own output goes through.
+// What the monitor has said while answering the command in hand.
+//
+// It used to go out as O packets, the same ones the program's own output
+// goes through, and from outside the two were then one stream: a driver
+// reading gdb could not tell "ran 1500 frames" from something the
+// program printed, and had to guess by the wording.  The protocol has a
+// channel for exactly this -- a reply to qRcmd that is not OK is decoded
+// and printed by gdb as the output of that command -- so this collects
+// the lines and the reply carries them, leaving the O packets to the
+// program alone.  That much separates them for a driver that speaks the
+// protocol itself.
+//
+// It does not separate them for a driver working through gdb, because
+// gdb prints a monitor command's output to the same stream it prints the
+// program's to.  So every line said here is marked as well, and a driver
+// sorts the one stream with a line prefix: "uknc: " is this server
+// talking, everything else is the machine.
+std::string g_monitorOutput;
+bool g_okInMonitor = false;
+
+// A reply has to fit one packet, and it is hex, so two characters to the
+// byte.  What will not fit goes back the old way rather than being cut
+// short: an answer in the wrong channel beats half an answer.
+const size_t kPacketSize = 0x1000;
+
+// Whether the last thing to reach gdb's output ended a line.  A prefix
+// only marks a line when it starts one, and the machine's own output
+// mostly does not end in a newline -- RT-11's prompts do not -- so a
+// reply would otherwise be stuck on the end of one of its lines.
+bool g_okAtLineStart = true;
+
+// Straight down the program's own channel, verbatim.  In pieces that fit
+// a packet: hex is two characters to the byte, and what is sent here can
+// be a whole screen.
+void SendOutputText(const std::string& text)
+{
+    const size_t kAtATime = 1000;
+
+    if (text.empty())
+        return;
+
+    for (size_t at = 0; at < text.size(); at += kAtATime)
+    {
+        const size_t count = std::min(kAtATime, text.size() - at);
+        std::string hex;
+
+        for (size_t i = 0; i < count; i++)
+            AppendByte(hex, (uint8_t)text[at + i]);
+        SendPacket("O" + hex);
+    }
+    g_okAtLineStart = (text[text.size() - 1] == '\n');
+}
+
+// Printable, because this travels through gdb's own output: the protocol
+// would carry the bytes themselves, but gdb prints what it decodes and a
+// terminal is no place for a PNG.
+std::string Base64(const std::vector<uint8_t>& data)
+{
+    static const char* const kDigits =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+
+    out.reserve((data.size() + 2) / 3 * 4);
+    for (size_t at = 0; at < data.size(); at += 3)
+    {
+        const size_t left = data.size() - at;
+        const uint32_t three = ((uint32_t)data[at] << 16)
+            | (left > 1 ? ((uint32_t)data[at + 1] << 8) : 0)
+            | (left > 2 ? (uint32_t)data[at + 2] : 0);
+
+        out.push_back(kDigits[(three >> 18) & 0x3f]);
+        out.push_back(kDigits[(three >> 12) & 0x3f]);
+        out.push_back(left > 1 ? kDigits[(three >> 6) & 0x3f] : '=');
+        out.push_back(left > 2 ? kDigits[three & 0x3f] : '=');
+    }
+    return out;
+}
+
+// What marks a line as this server's rather than the machine's.
+const char* const kSaid = "uknc: ";
+
 void MonitorSay(const std::string& text)
 {
-    std::string hex;
-    for (char ch : text)
-        AppendByte(hex, (uint8_t)ch);
-    AppendByte(hex, (uint8_t)'\n');
-    SendPacket("O" + hex);
+    if (g_okInMonitor)
+    {
+        g_monitorOutput += kSaid;
+        g_monitorOutput += text;
+        g_monitorOutput.push_back('\n');
+        return;
+    }
+
+    // Said with no command in hand -- a fault reported while the program
+    // was running, say.  There is no reply to attach it to.
+    SendOutputText(kSaid + text + "\n");
 }
 
 // The word up to the first space, and what is left after it.
@@ -1074,9 +1159,13 @@ void MonitorHelp()
     MonitorSay("monitor reset            switch the machine off and on");
     MonitorSay("monitor keys TEXT        type that on its keyboard, and Enter");
     MonitorSay("monitor frames N         let the machine run N frames (1/50 s each)");
+    MonitorSay("monitor waitfor [N] output TEXT   run until the machine prints TEXT");
+    MonitorSay("monitor waitfor [N] word ADDR OP VALUE   ... until memory matches");
+    MonitorSay("monitor waitfor [N] byte ADDR OP VALUE   ... the same for a byte");
     MonitorSay("monitor disk N FILE      put a floppy image in drive N (1-4)");
     MonitorSay("monitor screen on|off    show the machine's screen, or stop");
     MonitorSay("monitor screenshot FILE  write the screen to FILE, as a BMP");
+    MonitorSay("monitor screenshot       the screen itself, as base64 PNG");
     MonitorSay("monitor prof on|off      count CPU ticks per instruction");
     MonitorSay("monitor prof             how much has been counted so far");
     MonitorSay("monitor prof reset       throw that away and start again");
@@ -1084,6 +1173,77 @@ void MonitorHelp()
     MonitorSay("monitor prof save FILE   every counted address, with its ticks");
     MonitorSay("monitor prof ppu ...     the same, for the second processor");
     MonitorSay("monitor fault on|off     stop where a program halts");
+}
+
+
+// How long "waitfor" runs when it is not told: 20000 frames is 400
+// seconds of the machine's own time, which is longer than anything this
+// is used to wait for and short enough to come back from.
+const int kWaitForFrames = 20000;
+
+// A condition to run the machine until.
+struct WaitFor
+{
+    enum Kind { Output, Word, Byte } kind;
+    std::string text;           // Output: the bytes to look for
+    uint16_t    address;        // Word, Byte: where to look
+    std::string op;             // Word, Byte: how to compare
+    uint32_t    value;          // Word, Byte: what to compare against
+};
+
+bool IsCompareOp(const std::string& op)
+{
+    return op == "==" || op == "!=" || op == "<"
+        || op == "<=" || op == ">"  || op == ">=";
+}
+
+bool CompareWith(const std::string& op, uint32_t left, uint32_t right)
+{
+    if (op == "==") return left == right;
+    if (op == "!=") return left != right;
+    if (op == "<")  return left <  right;
+    if (op == "<=") return left <= right;
+    if (op == ">")  return left >  right;
+    if (op == ">=") return left >= right;
+    return false;
+}
+
+// Octal, like every address this machine's own tools print.
+bool ParseOctal(const std::string& text, uint32_t* value)
+{
+    if (text.empty() || text.find_first_not_of("01234567") != std::string::npos)
+        return false;
+    *value = (uint32_t)strtoul(text.c_str(), nullptr, 8);
+    return true;
+}
+
+bool WaitForHolds(const WaitFor& w, const std::string& seen)
+{
+    switch (w.kind)
+    {
+    case WaitFor::Output:
+        return seen.find(w.text) != std::string::npos;
+    case WaitFor::Word:
+        return CompareWith(w.op,
+                           (uint32_t)(ReadMemoryByte(w.address)
+                                      | (ReadMemoryByte((uint16_t)(w.address + 1)) << 8)),
+                           w.value);
+    case WaitFor::Byte:
+        return CompareWith(w.op, (uint32_t)ReadMemoryByte(w.address), w.value);
+    }
+    return false;
+}
+
+std::string WaitForName(const WaitFor& w)
+{
+    char line[128];
+
+    if (w.kind == WaitFor::Output)
+        return "\"" + w.text + "\" in the machine's output";
+    snprintf(line, sizeof(line), "%s %06o %s %06o",
+             w.kind == WaitFor::Word ? "word" : "byte",
+             w.address, w.op.c_str(), w.value);
+    return line;
 }
 
 // Carries out one command.  Everything it has to say goes back through
@@ -1149,7 +1309,8 @@ void MonitorCommand(const std::string& line)
             char line[96];
 
             snprintf(line, sizeof(line),
-                     "%s halted at %06o, after %d frames",
+                     "[halted] %s halted at %06o after %d frames;"
+                     " monitor reset starts the machine over",
                      g_pBoard->GetFaultWho() == 1 ? "CPU" : "PPU",
                      g_pBoard->GetFaultPC(), ran);
             MonitorSay(line);
@@ -1158,6 +1319,144 @@ void MonitorCommand(const std::string& line)
         }
 
         MonitorSay("ran " + std::to_string(ran) + " frames");
+        return;
+    }
+
+    if (word == "waitfor")
+    {
+        // Running a fixed number of frames and hoping is what this
+        // replaces: it says what it is waiting for, stops as soon as
+        // that is true, and says how long it took -- or that it never
+        // happened, which a frame count can never tell you.
+        std::string head, tail = rest;
+        int budget = kWaitForFrames;
+
+        SplitCommand(tail, &head, &tail);
+        if (!head.empty()
+            && head.find_first_not_of("0123456789") == std::string::npos)
+        {
+            budget = atoi(head.c_str());
+            SplitCommand(tail, &head, &tail);
+        }
+        if (budget <= 0)
+        {
+            MonitorSay("usage: monitor waitfor [N] output TEXT");
+            return;
+        }
+
+        WaitFor w;
+        if (head == "output")
+        {
+            // The rest of the line as it stands, spaces and all
+            if (tail.empty())
+            {
+                MonitorSay("usage: monitor waitfor [N] output TEXT");
+                return;
+            }
+            w.kind = WaitFor::Output;
+            w.text = tail;
+        }
+        else
+        if (head == "word" || head == "byte")
+        {
+            std::string addrText, opText, valueText;
+            uint32_t address, value;
+
+            SplitCommand(tail, &addrText, &tail);
+            SplitCommand(tail, &opText, &tail);
+            SplitCommand(tail, &valueText, &tail);
+            if (!ParseOctal(addrText, &address) || !IsCompareOp(opText)
+                || !ParseOctal(valueText, &value))
+            {
+                MonitorSay("usage: monitor waitfor [N] word ADDR OP VALUE,"
+                           " addresses and values octal, OP one of"
+                           " == != < <= > >=");
+                return;
+            }
+            w.kind    = (head == "word") ? WaitFor::Word : WaitFor::Byte;
+            w.address = (uint16_t)address;
+            w.op      = opText;
+            w.value   = value;
+        }
+        else
+        {
+            MonitorSay("usage: monitor waitfor [N] output TEXT"
+                       " | word ADDR OP VALUE | byte ADDR OP VALUE");
+            return;
+        }
+
+        // True before a single frame is run is a legitimate answer
+        std::string seen;
+        if (WaitForHolds(w, seen))
+        {
+            MonitorSay("[found] " + WaitForName(w) + " already, after 0 frames");
+            return;
+        }
+
+        Emulator_Start();
+        int ran = 0;
+        bool found = false;
+        bool closed = false;
+        for (; ran < budget && g_okEmulatorRunning; ran++)
+        {
+            Emulator_SystemFrame();
+            Screen_Frame();
+            // The program's own output keeps flowing to gdb as it does
+            // without this command; the copy is what gets searched
+            seen += g_consoleOutput;
+            FlushConsoleOutput();
+            if (g_pBoard->GetFaultWho() != 0)
+                break;
+            if (WaitForHolds(w, seen))
+            {
+                found = true;
+                ran++;
+                break;
+            }
+            if (Screen_QuitRequested())
+            {
+                closed = true;
+                break;
+            }
+        }
+        Emulator_Stop();
+        FlushConsoleOutput();
+
+        char line[256];
+
+        if (g_pBoard->GetFaultWho() != 0)
+        {
+            snprintf(line, sizeof(line),
+                     "[halted] %s halted at %06o after %d frames, waiting for %s;"
+                     " monitor reset starts the machine over",
+                     g_pBoard->GetFaultWho() == 1 ? "CPU" : "PPU",
+                     g_pBoard->GetFaultPC(), ran, WaitForName(w).c_str());
+            MonitorSay(line);
+            g_pBoard->ClearFault();
+            return;
+        }
+        if (found)
+        {
+            snprintf(line, sizeof(line), "[found] %s after %d frames",
+                     WaitForName(w).c_str(), ran);
+            MonitorSay(line);
+            return;
+        }
+
+        if (closed)
+        {
+            snprintf(line, sizeof(line),
+                     "[stopped] the screen was closed after %d frames,"
+                     " waiting for %s", ran, WaitForName(w).c_str());
+            MonitorSay(line);
+            return;
+        }
+
+        snprintf(line, sizeof(line),
+                 "[timeout] %s after %d frames; the machine is still running --"
+                 " monitor waitfor N ... waits longer, monitor reset starts over",
+                 ("no " + WaitForName(w)).c_str(), ran);
+        MonitorSay(line);
         return;
     }
 
@@ -1203,7 +1502,29 @@ void MonitorCommand(const std::string& line)
     {
         if (rest.empty())
         {
-            MonitorSay("usage: monitor screenshot FILE");
+            // No file: the picture itself comes back, for a driver with
+            // no way to read a file this program wrote -- or that is not
+            // on the same machine as it.  Between the two markers, one
+            // line of base64 at a time, each marked like everything else
+            // said here
+            std::vector<uint8_t> png;
+            if (!Screen_Png(&png))
+            {
+                MonitorSay("[failed] the screen could not be encoded");
+                return;
+            }
+
+            const std::string encoded = Base64(png);
+            char line[96];
+
+            snprintf(line, sizeof(line),
+                     "screen %d x %d, PNG, %lu bytes", UKNC_SCREEN_WIDTH,
+                     UKNC_SCREEN_HEIGHT, (unsigned long)png.size());
+            MonitorSay(line);
+            MonitorSay("screen-begin");
+            for (size_t at = 0; at < encoded.size(); at += 76)
+                MonitorSay(encoded.substr(at, 76));
+            MonitorSay("screen-end");
             return;
         }
         if (Screen_Save(rest.c_str()))
@@ -1649,8 +1970,28 @@ bool HandlePacket(const std::string& packet)
                     return SendPacket("E01");
                 line.push_back((char)((high << 4) | low));
             }
+            g_monitorOutput.clear();
+            g_okInMonitor = true;
             MonitorCommand(line);
-            return SendPacket("OK");
+            g_okInMonitor = false;
+
+            if (g_monitorOutput.empty())
+                return SendPacket("OK");
+
+            // gdb prints this where the machine's output left off
+            if (!g_okAtLineStart)
+                g_monitorOutput.insert(0, 1, '\n');
+            g_okAtLineStart = true;
+
+            std::string reply;
+            for (char ch : g_monitorOutput)
+                AppendByte(reply, (uint8_t)ch);
+            if (reply.size() + 8 > kPacketSize)
+            {
+                SendOutputText(g_monitorOutput);
+                return SendPacket("OK");
+            }
+            return SendPacket(reply);
         }
         if (packet.compare(0, 17, "qThreadExtraInfo,") == 0)
         {

@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <zlib.h>
+
 #include "Emulator.h"
 #include "emubase/Emubase.h"
 #include "Screen.h"
@@ -31,7 +33,85 @@ void AppendLong(std::string& out, uint32_t value)
     AppendWord(out, (uint16_t)(value >> 16));
 }
 
+// A PNG counts the other way round from a BMP.
+void AppendLongBE(std::string& out, uint32_t value)
+{
+    out.push_back((char)((value >> 24) & 0xff));
+    out.push_back((char)((value >> 16) & 0xff));
+    out.push_back((char)((value >> 8) & 0xff));
+    out.push_back((char)(value & 0xff));
+}
+
+// One PNG chunk: its length, its four-character type, its data, and a
+// checksum over the type and the data.
+void AppendPngChunk(std::string& out, const char* type, const std::string& data)
+{
+    std::string body(type);
+    body += data;
+
+    AppendLongBE(out, (uint32_t)data.size());
+    out += body;
+    AppendLongBE(out, (uint32_t)crc32(0, (const Bytef*)body.data(),
+                                      (uInt)body.size()));
+}
+
 }  // namespace
+
+// The screen as a PNG in memory, for a driver that cannot see this
+// machine's filesystem -- or is not on the same machine at all.  PNG
+// rather than the BMP a file gets because this one travels: a screen of
+// text comes to a few kilobytes compressed, where the BMP is always 553.
+bool Screen_Png(std::vector<uint8_t>* out)
+{
+    const int width = UKNC_SCREEN_WIDTH;
+    const int height = UKNC_SCREEN_HEIGHT;
+
+    std::vector<uint32_t> pixels((size_t)width * height);
+    Emulator_PrepareScreenRGB32(pixels.data(), Emulator_GetPalette());
+
+    // What PNG calls the raw image: each row led by its filter byte,
+    // then three bytes a pixel, red first, top row first.  Filter 0 is
+    // "no filter" -- deflate does the work, and a screen of text is
+    // mostly one colour, which it likes
+    std::string raw;
+    raw.reserve((size_t)height * (1 + (size_t)width * 3));
+    for (int y = 0; y < height; y++)
+    {
+        const uint32_t* line = pixels.data() + (size_t)y * width;
+
+        raw.push_back(0);
+        for (int x = 0; x < width; x++)
+        {
+            raw.push_back((char)((line[x] >> 16) & 0xff));
+            raw.push_back((char)((line[x] >> 8) & 0xff));
+            raw.push_back((char)(line[x] & 0xff));
+        }
+    }
+
+    uLongf packedSize = compressBound((uLong)raw.size());
+    std::vector<uint8_t> packed((size_t)packedSize);
+    if (compress2(packed.data(), &packedSize, (const Bytef*)raw.data(),
+                  (uLong)raw.size(), Z_BEST_COMPRESSION) != Z_OK)
+        return false;
+
+    std::string png("\x89PNG\r\n\x1a\n", 8);
+
+    std::string ihdr;
+    AppendLongBE(ihdr, (uint32_t)width);
+    AppendLongBE(ihdr, (uint32_t)height);
+    ihdr.push_back(8);                   // Bits per channel
+    ihdr.push_back(2);                   // Colour type: red, green, blue
+    ihdr.push_back(0);                   // Deflate, the only method there is
+    ihdr.push_back(0);                   // Filtering, likewise
+    ihdr.push_back(0);                   // Not interlaced
+    AppendPngChunk(png, "IHDR", ihdr);
+    AppendPngChunk(png, "IDAT",
+                   std::string((const char*)packed.data(), (size_t)packedSize));
+    AppendPngChunk(png, "IEND", std::string());
+
+    out->assign(png.begin(), png.end());
+    return true;
+}
 
 bool Screen_Save(const char* path)
 {
