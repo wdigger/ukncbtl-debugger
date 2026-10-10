@@ -133,9 +133,13 @@ a line through to the other end, and this is what the other end does with it:
 | `monitor reset` | switch the machine off and on |
 | `monitor keys TEXT` | type that on its keyboard, and Enter |
 | `monitor frames N` | let it run N frames of 1/50 s |
+| `monitor waitfor [N] output TEXT` | let it run until it prints TEXT |
+| `monitor waitfor [N] word ADDR OP VALUE` | until a word in its memory matches |
+| `monitor waitfor [N] byte ADDR OP VALUE` | the same for one byte |
 | `monitor disk N FILE` | put a floppy image in drive N (1–4) |
 | `monitor screen on`, `off` | show its screen in a window, or stop |
 | `monitor screenshot FILE` | write the screen to FILE, as a BMP |
+| `monitor screenshot` | the screen itself, as base64 PNG |
 | `monitor prof on`, `off` | count CPU ticks per instruction address |
 | `monitor prof` | how much has been counted so far |
 | `monitor prof reset` | throw that away and start again |
@@ -150,14 +154,50 @@ without gdb starting anything looks like
 
 ```
 (gdb) monitor keys R DEMO
-(gdb) monitor frames 300
+(gdb) monitor waitfor output ready
+uknc: [found] "ready" in the machine's output after 212 frames
 (gdb) monitor screenshot /tmp/demo.bmp
 ```
 
-and the program's own output comes back in the terminal as it goes. The screenshot is drawn
-from the machine's memory rather than from anything on screen, so it works with no window open
-and in a build with no SDL3 — which is the point: a program that draws is otherwise hard to
-check from a script.
+and the program's own output comes back in the terminal as it goes.
+
+`waitfor` is what to reach for instead of a frame count. A count says nothing: a machine that
+finished in seventy frames and one that will never finish look the same from outside, and the
+only way to find out is to ask for more frames and look again. This runs until the thing you
+are waiting for is true, stops there, and says how long it took — or says it never happened,
+which is the answer a count can never give. The budget before it gives up is 20000 frames, four
+hundred seconds of the machine's own time, and `monitor waitfor 100000 output ...` waits longer.
+Addresses and values are octal, like everything this machine prints; the comparisons are `==`
+`!=` `<` `<=` `>` `>=`; and the memory is read where the `m` packet reads it — the processor
+gdb has selected, through the view that does not disturb a device register by looking at it.
+
+How much a count can mislead: this project's own scripts wait 1500 frames for the boot, and the
+first prompt arrives at 1545. They worked because what they typed sat in the keyboard queue
+until the machine got round to it.
+
+**What this server says is marked.** Every line of it begins `uknc: ` — `[found]` above, `ran
+300 frames`, everything. What the machine prints is not marked at all, so one grep tells the
+two apart in a stream where gdb has mixed them, which it does: it prints a monitor command's
+output to the same place as the program's. (A driver speaking the protocol itself needs no
+grep. The monitor's output comes back as the reply to `qRcmd`, which is the protocol's own
+channel for what a command has to say; the program's output stays on the `O` packets.)
+
+The screenshot is drawn from the machine's memory rather than from anything on screen, so it
+works with no window open and in a build with no SDL3 — which is the point: a program that
+draws is otherwise hard to check from a script. With no file named it answers with the picture
+itself, base64 between `screen-begin` and `screen-end`, for a driver that cannot read a file
+this program wrote or is not on the same machine as it. That one is a PNG rather than the BMP a
+file gets, because it travels: a screen of text comes to two or three kilobytes where the BMP is
+always 553.
+
+```
+(gdb) monitor screenshot
+uknc: screen 640 x 288, PNG, 2215 bytes
+uknc: screen-begin
+uknc: iVBORw0KGgoAAAANSUhEUgAAAoAAAAEgCAIAAAC...
+...
+uknc: screen-end
+```
 
 `prof` is not a sampling profiler. The core steps the CPU one clock tick at a time, so every
 tick is charged to the address of the instruction being executed at that moment: what comes
